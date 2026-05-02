@@ -21,7 +21,7 @@ impl InterruptDescriptorTable {
         // 16 byte long and can be located from asm_interrupt_handler0.
         let mut idt = zeroed_box::<InterruptDescriptorTableRaw>();
         for i in 0..idt.0.len() {
-            let handler = asm_interrupt_handler0 as usize + 0x10 * i;
+            let handler = asm_interrupt_handler0 as *const () as usize + 0x10 * i;
             idt.0[i] = InterruptDescriptorTableEntry::new(handler, cs);
         }
 
