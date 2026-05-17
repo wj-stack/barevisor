@@ -207,7 +207,8 @@ impl VmxGuest {
                     | vmcs::control::SecondaryControls::UNRESTRICTED_GUEST
                     | vmcs::control::SecondaryControls::ENABLE_RDTSCP
                     | vmcs::control::SecondaryControls::ENABLE_INVPCID
-                    | vmcs::control::SecondaryControls::ENABLE_XSAVES_XRSTORS)
+                    | vmcs::control::SecondaryControls::ENABLE_XSAVES_XRSTORS
+                    | vmcs::control::SecondaryControls::ENABLE_USER_WAIT_PAUSE)
                     .bits() as _,
             ),
         );
@@ -400,10 +401,11 @@ impl VmxGuest {
 
                 let allowed1 = rdmsr(IA32_VMX_PROCBASED_CTLS3);
                 let effective_value = requested_value & allowed1;
-                assert!(
-                    effective_value | requested_value == effective_value,
-                    "One or more requested features are not supported: {effective_value:#x?} : {requested_value:#x?} "
-                );
+                if effective_value | requested_value != effective_value {
+                    log::debug!(
+                        "Ignored one or more requested unsupported features for {control:#x?}: {effective_value:#x?} vs {requested_value:#x?}"
+                    );
+                }
                 return effective_value;
             }
         };
@@ -437,10 +439,11 @@ impl VmxGuest {
         let mut effective_value = requested_value;
         effective_value |= allowed0;
         effective_value &= allowed1;
-        assert!(
-            effective_value | requested_value == effective_value,
-            "One or more requested features are not supported for {control:?}: {effective_value:#x?} vs {requested_value:#x?}"
-        );
+        if effective_value | requested_value != effective_value {
+            log::debug!(
+                "Ignored one or more requested unsupported features for {control:#x?}: {effective_value:#x?} vs {requested_value:#x?}"
+            );
+        }
         u64::from(effective_value)
     }
 
