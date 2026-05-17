@@ -26,7 +26,7 @@ Not just for learning, this type of hypervisor is also practical. Thanks to its 
 
 How does a hypervisor hyperjack the system?
 
-The most common way a hypervisor hyperjacks the system is by starting a VM based on the current processor state. Then, by letting the VM access all hardware resources by default, the VM can behave as if nothing were changed. The hypervisor can selectively intercept hardware resource access by the VM to protect the hypervisor and provide additional features such as protecting security-sensitive resources like Control Registers from a comprimised kernel.
+The most common way a hypervisor hyperjacks the system is by starting a VM based on the current processor state. Then, by letting the VM access all hardware resources by default, the VM can behave as if nothing were changed. The hypervisor can selectively intercept hardware resource access by the VM to protect the hypervisor and provide additional features such as protecting security-sensitive resources like Control Registers from a compromised kernel.
 
 The same goes for memory. The hypervisor configures memory virtualization (EPT on Intel, and NPT on AMD) to let the VM access all physical memory by default. Then, selectively restrict access as needed, for example, to hide the hypervisor and enforce the W^X policy.
 

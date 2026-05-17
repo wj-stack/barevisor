@@ -89,7 +89,7 @@ impl Mtrr {
                         return_memory_type = Some(mtrr.memory_type);
                     }
                 } else {
-                    // Overwise, use the last matching MTRR's memory type.
+                    // Otherwise, use the last matching MTRR's memory type.
                     return_memory_type = Some(mtrr.memory_type);
                 }
             }

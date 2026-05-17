@@ -8,7 +8,7 @@ use alloc::{
     string::{String, ToString},
 };
 use derive_more::Debug;
-use spin::Lazy;
+use spin::LazyLock;
 use x86::{
     bits64::{paging::BASE_PAGE_SIZE, rflags::RFlags},
     controlregs::{Cr0, Cr4},
@@ -375,7 +375,7 @@ impl VmxGuest {
         const IA32_VMX_BASIC_VMX_CONTROLS_FLAG: u64 = 1 << 55;
 
         // This determines the right VMX capability MSR based on the value of
-        // IA32_VMX_BASIC. This is required to fullfil the following requirements:
+        // IA32_VMX_BASIC. This is required to fulfil the following requirements:
         //
         // "It is necessary for software to consult only one of the capability MSRs
         //  to determine the allowed settings of the pin based VM-execution controls:"
@@ -636,7 +636,7 @@ struct SharedGuestData {
     epts: Box<Epts>,
 }
 
-static SHARED_GUEST_DATA: Lazy<SharedGuestData> = Lazy::new(|| {
+static SHARED_GUEST_DATA: LazyLock<SharedGuestData> = LazyLock::new(|| {
     let mut epts = zeroed_box::<Epts>();
     epts.build_identity();
 
@@ -721,7 +721,7 @@ pub(crate) fn get_adjusted_cr0(cr0: Cr0) -> Cr0 {
     // Bit X  0                   1                   The bit X of CR0 is flexible
     // Bit X  (Always 0)          0                   The bit X of CR0 is fixed to 0
     //
-    // Some UEFI implementations do not fullfil those requirements for CR0 and
+    // Some UEFI implementations do not fulfil those requirements for CR0 and
     // need adjustments. The requirements for CR4 are always satisfied as far
     // as the author has experimented (although not guaranteed).
     //

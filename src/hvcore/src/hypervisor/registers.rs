@@ -43,7 +43,7 @@ impl Registers {
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Xmm {
     pub(crate) low: u64,
-    pub(crate) hight: u64,
+    pub(crate) high: u64,
 }
 
 unsafe extern "C" {

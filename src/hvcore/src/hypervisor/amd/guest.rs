@@ -9,7 +9,7 @@ use core::{
 use alloc::boxed::Box;
 use bit_field::BitField;
 use derive_more::Debug;
-use spin::{Lazy, RwLock};
+use spin::{LazyLock, RwLock};
 use x86::{
     bits64::{paging::BASE_PAGE_SHIFT, rflags::RFlags},
     controlregs::cr3_write,
@@ -798,7 +798,7 @@ impl SharedGuestData {
     }
 }
 
-static SHARED_GUEST_DATA: Lazy<SharedGuestData> = Lazy::new(SharedGuestData::new);
+static SHARED_GUEST_DATA: LazyLock<SharedGuestData> = LazyLock::new(SharedGuestData::new);
 
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
