@@ -11,7 +11,7 @@ use core::{
 use bitvec::{array::BitArray, prelude::*};
 use spin::{Mutex, Once};
 
-pub const ALLOCATION_BYTES: usize = 0x80_0000;
+pub const ALLOCATION_BYTES: usize = 0xa0_0000;
 pub const ALLOCATION_PAGES: usize = ALLOCATION_BYTES / 0x1000;
 
 /// Initializes the global allocator. `ptr` must be as large as `ALLOCATION_BYTES`
@@ -127,7 +127,7 @@ fn find_empty_blocks<const BIT_COUNT: usize>(
     None
 }
 
-const NUMBER_OF_BLOCK_4096: usize = 0x700;
+const NUMBER_OF_BLOCK_4096: usize = 0x900;
 const NUMBER_OF_BLOCK_128: usize = 0x2000;
 
 static METADATA: Once<Mutex<Metadata>> = Once::new();

@@ -1,6 +1,8 @@
 use core::ptr::addr_of;
 
-use x86::bits64::paging::{BASE_PAGE_SHIFT, BASE_PAGE_SIZE, LARGE_PAGE_SIZE};
+use x86::bits64::paging::{
+    BASE_PAGE_SHIFT, BASE_PAGE_SIZE, HUGE_PAGE_SIZE, LARGE_PAGE_SIZE, PML4_SLOT_SIZE,
+};
 
 use crate::{hypervisor::intel::mtrr::MemoryType, hypervisor::platform_ops};
 
@@ -9,7 +11,7 @@ use super::mtrr::Mtrr;
 #[repr(C, align(4096))]
 pub(crate) struct Epts {
     pml4: Pml4,
-    pdpt: Pdpt,
+    pdpt: [Pdpt; 512],
     pd: [Pd; 512],
     pt: Pt,
 }
@@ -24,23 +26,32 @@ impl Epts {
 
         let mut pa = 0u64;
 
+        // First, initialize the entry 0 of PML4 and sub tables, covering up to
+        // 512GB. This area includes physical memory backed by DRAM. Translations
+        // are managed by 4KB EPT PTs for the first 2MB, and by 2MB EPT PDs for
+        // the rest to reflect MTRR memory types into EPT memory types.
         self.pml4.0.entries[0].set_readable(true);
         self.pml4.0.entries[0].set_writable(true);
         self.pml4.0.entries[0].set_executable(true);
-        self.pml4.0.entries[0].set_pfn(ops.pa(addr_of!(self.pdpt) as _) >> BASE_PAGE_SHIFT);
-        for (i, pdpte) in self.pdpt.0.entries.iter_mut().enumerate() {
+        self.pml4.0.entries[0].set_pfn(ops.pa(addr_of!(self.pdpt[0]) as _) >> BASE_PAGE_SHIFT);
+        for (i, pdpte) in self.pdpt[0].0.entries.iter_mut().enumerate() {
+            // Initialize each PDPT.
             pdpte.set_readable(true);
             pdpte.set_writable(true);
             pdpte.set_executable(true);
             pdpte.set_pfn(ops.pa(addr_of!(self.pd[i]) as _) >> BASE_PAGE_SHIFT);
+
+            // Initialize each PD.
             for pde in &mut self.pd[i].0.entries {
                 if pa == 0 {
-                    // First 2MB is managed by 4KB EPT PTs so MTRR memory types
-                    // are properly reflected into the EPT memory memory types.
+                    // First 2MB. Managed by 4KB EPT PTs.
+
                     pde.set_readable(true);
                     pde.set_writable(true);
                     pde.set_executable(true);
                     pde.set_pfn(ops.pa(addr_of!(self.pt) as _) >> BASE_PAGE_SHIFT);
+
+                    // Initialize each PT.
                     for pte in &mut self.pt.0.entries {
                         let memory_type =
                             mtrr.find(pa..pa + BASE_PAGE_SIZE as u64)
@@ -55,12 +66,14 @@ impl Epts {
                         pa += BASE_PAGE_SIZE as u64;
                     }
                 } else {
-                    // For the rest of GPAes, manage them with 2MB large page EPTs.
-                    // We assume MTRR memory types are configured for 2MB or greater
-                    // granularity.
-                    let memory_type = mtrr
-                        .find(pa..pa + LARGE_PAGE_SIZE as u64)
-                        .unwrap_or_else(|| panic!("Could not resolve a memory type for {pa:#x?}"));
+                    // The rest. Managed by 2MB EPT PDs.
+                    let memory_type =
+                        mtrr.find(pa..pa + LARGE_PAGE_SIZE as u64)
+                            .unwrap_or_else(|| {
+                                log::warn!("Could not resolve a memory type for {pa:#x?}");
+                                // Failing back to uncacheable as the safest option.
+                                MemoryType::Uncachable
+                            });
                     pde.set_readable(true);
                     pde.set_writable(true);
                     pde.set_executable(true);
@@ -69,6 +82,31 @@ impl Epts {
                     pde.set_pfn(pa >> BASE_PAGE_SHIFT);
                     pa += LARGE_PAGE_SIZE as u64;
                 }
+            }
+        }
+
+        // Initialize remaining 511 PML4 entries with 1GB EPT PDPTs. This area
+        // is for MMIO. We can use 1GB pages as we assume that MTRR configuration
+        // is compatible with the 1GB page glanularity.
+        assert!(pa == PML4_SLOT_SIZE as u64);
+        for (pml4_index, pml4e) in self.pml4.0.entries.iter_mut().enumerate().skip(1) {
+            pml4e.set_readable(true);
+            pml4e.set_writable(true);
+            pml4e.set_executable(true);
+            pml4e.set_pfn(ops.pa(addr_of!(self.pdpt[pml4_index]) as _) >> BASE_PAGE_SHIFT);
+
+            // Initialize each PDPT with 1GB pages.
+            for pdpte in &mut self.pdpt[pml4_index].0.entries {
+                let memory_type = mtrr
+                    .find(pa..pa + PML4_SLOT_SIZE as u64)
+                    .unwrap_or_else(|| panic!("Could not resolve a memory type for {pa:#x?}"));
+                pdpte.set_readable(true);
+                pdpte.set_writable(true);
+                pdpte.set_executable(true);
+                pdpte.set_memory_type(memory_type as u64);
+                pdpte.set_large(true);
+                pdpte.set_pfn(pa >> BASE_PAGE_SHIFT);
+                pa += HUGE_PAGE_SIZE as u64;
             }
         }
     }
