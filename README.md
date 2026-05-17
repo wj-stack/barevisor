@@ -71,5 +71,5 @@ If you wish to learn more about those missing features, ask me questions or for 
 
 ## Supported hardware models
 
-- Intel: [11TNHi5 Full with 9-pin to DE-9P](https://simplynuc.com/product/nuc11tnhi5-full/)
+- Intel: [PICO-MTU4-SEMI](https://www.aaeon.com/en/product/detail/pico-semi_pico-mtu4-semi)
 - AMD: [LLM1v6SQ](https://simplynuc.com/product/llm1v6sq/)
