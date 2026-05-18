@@ -8,10 +8,10 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use anyhow::{Result, ensure};
+use anyhow::{ensure, Result};
 use vnc::client::AuthChoice;
 
-use super::{TestVm, UnixCommand, copy_artifacts_to};
+use super::{copy_artifacts_to, TestVm, UnixCommand};
 
 pub(crate) struct Vmware;
 
@@ -57,9 +57,9 @@ impl TestVm for Vmware {
 
     fn run(&self) -> Result<()> {
         let vmrun = if cfg!(target_os = "windows") {
-            r"C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe"
+            r"C:\Program Files\VMware\VMware Workstation\vmrun.exe"
         } else if wsl::is_wsl() {
-            "/mnt/c/Program Files (x86)/VMware/VMware Workstation/vmrun.exe"
+            "/mnt/c/Program Files/VMware/VMware Workstation/vmrun.exe"
         } else {
             "vmrun"
         };
