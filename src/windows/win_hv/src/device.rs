@@ -4,9 +4,10 @@ use core::mem::size_of;
 
 use shared_contract::{
     GetCr3ByPidRequest, GetCr3ByPidResponse, IOCTL_GET_CR3_BY_PID, IOCTL_PING,
-    IOCTL_READ_GVA, IOCTL_READ_MEMORY, IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY, MEM_IO_MAX_LEN,
-    MemIoRequest, PING_RESPONSE_U32, ReadGvaRequest, TranslateGvaRequest, TranslateGvaResponse,
-    TRANSLATE_FAIL_CR3, TRANSLATE_METHOD_CR3_SWITCH, TRANSLATE_METHOD_PAGE_WALK,
+    IOCTL_READ_GVA, IOCTL_READ_MEMORY, IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY,
+    IOCTL_WRITE_PHYSICAL, MEM_IO_MAX_LEN, MemIoRequest, PhysMemIoRequest, PING_RESPONSE_U32,
+    ReadGvaRequest, TranslateGvaRequest, TranslateGvaResponse, TRANSLATE_FAIL_CR3,
+    TRANSLATE_METHOD_CR3_SWITCH, TRANSLATE_METHOD_PAGE_WALK,
 };
 use wdk_sys::{
     CCHAR, DEVICE_OBJECT, DRIVER_OBJECT, IO_NO_INCREMENT, IRP, NTSTATUS,
@@ -97,6 +98,7 @@ unsafe extern "C" fn dispatch_device_control(
             handle_ioctl_translate_gva(irp, input_len, output_len, system_buffer)
         }
         IOCTL_READ_GVA => handle_ioctl_read_gva(irp, input_len, output_len, system_buffer),
+        IOCTL_WRITE_PHYSICAL => handle_ioctl_write_physical(irp, input_len, system_buffer),
         _ => unsafe { complete_request(irp, STATUS_INVALID_DEVICE_REQUEST, 0) },
     }
 }
@@ -398,6 +400,39 @@ fn handle_ioctl_read_gva(
     }
 
     unsafe { complete_request(irp, STATUS_SUCCESS, size) }
+}
+
+fn handle_ioctl_write_physical(
+    irp: *mut IRP,
+    input_len: usize,
+    system_buffer: *mut u8,
+) -> NTSTATUS {
+    if input_len < size_of::<PhysMemIoRequest>() {
+        return unsafe { complete_request(irp, STATUS_INVALID_PARAMETER, 0) };
+    }
+    if system_buffer.is_null() {
+        return unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, 0) };
+    }
+
+    let request = unsafe {
+        system_buffer
+            .cast::<PhysMemIoRequest>()
+            .read_unaligned()
+    };
+    let size = request.size as usize;
+    if size == 0 || size > MEM_IO_MAX_LEN {
+        return unsafe { complete_request(irp, STATUS_INVALID_PARAMETER, 0) };
+    }
+    if input_len < size_of::<PhysMemIoRequest>() + size {
+        return unsafe { complete_request(irp, STATUS_INVALID_PARAMETER, 0) };
+    }
+
+    let data = unsafe { system_buffer.add(size_of::<PhysMemIoRequest>()) };
+    if crate::paging::write_hpa(request.address, data, size).is_err() {
+        return unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, 0) };
+    }
+
+    unsafe { complete_request(irp, STATUS_SUCCESS, 0) }
 }
 
 extern "C" fn driver_unload(driver: *mut DRIVER_OBJECT) {

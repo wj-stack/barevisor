@@ -8,11 +8,11 @@ use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use shared_contract::{
     GetCr3ByPidRequest, GetCr3ByPidResponse, IOCTL_GET_CR3_BY_PID, IOCTL_PING, IOCTL_READ_GVA,
-    IOCTL_READ_MEMORY, IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY, MEM_IO_MAX_LEN, MemIoRequest,
-    PING_RESPONSE_U32, ReadGvaRequest, TranslateGvaRequest, TranslateGvaResponse,
-    TRANSLATE_FAIL_CR3, TRANSLATE_FAIL_INVALID, TRANSLATE_FAIL_MMGPA, TRANSLATE_FAIL_PD,
-    TRANSLATE_FAIL_PML4, TRANSLATE_FAIL_PDPT, TRANSLATE_FAIL_PTE, TRANSLATE_METHOD_CR3_SWITCH,
-    TRANSLATE_METHOD_PAGE_WALK, USER_DEVICE_PATH,
+    IOCTL_READ_MEMORY, IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY, IOCTL_WRITE_PHYSICAL,
+    MEM_IO_MAX_LEN, MemIoRequest, PhysMemIoRequest, PING_RESPONSE_U32, ReadGvaRequest,
+    TranslateGvaRequest, TranslateGvaResponse, TRANSLATE_FAIL_CR3, TRANSLATE_FAIL_INVALID,
+    TRANSLATE_FAIL_MMGPA, TRANSLATE_FAIL_PD, TRANSLATE_FAIL_PML4, TRANSLATE_FAIL_PDPT,
+    TRANSLATE_FAIL_PTE, TRANSLATE_METHOD_CR3_SWITCH, TRANSLATE_METHOD_PAGE_WALK, USER_DEVICE_PATH,
 };
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::Storage::FileSystem::{
@@ -94,7 +94,13 @@ enum Commands {
     /// Write hex bytes to guest memory at `address`.
     Write {
         address: String,
-        #[arg(short, long)]
+        #[arg(long)]
+        hex: String,
+    },
+    /// Write hex bytes to a host physical address.
+    WritePhys {
+        address: String,
+        #[arg(long)]
         hex: String,
     },
     /// Get kernel CR3 (`DirectoryTableBase`) for a process ID.
@@ -142,6 +148,7 @@ fn main() -> anyhow::Result<()> {
             read_gva(&handle, pid, cr3.as_deref(), &address, size)
         }
         Commands::Write { address, hex } => write_memory(&handle, &address, &hex),
+        Commands::WritePhys { address, hex } => write_physical(&handle, &address, &hex),
         Commands::Cr3 { pid } => get_cr3(&handle, pid),
         Commands::ListCr3 => list_cr3(&handle),
     };
@@ -423,6 +430,44 @@ fn write_memory(h: &HANDLE, address: &str, hex_data: &str) -> anyhow::Result<()>
         )?;
     }
     println!("wrote {size} bytes to {address:#x}");
+    Ok(())
+}
+
+fn write_physical(h: &HANDLE, address: &str, hex_data: &str) -> anyhow::Result<()> {
+    let address = parse_address(address)?;
+    let data = hex::decode(hex_data.replace(' ', "")).context("invalid hex payload")?;
+    let size = data.len();
+    if size == 0 || size > MEM_IO_MAX_LEN {
+        bail!("payload length must be 1..={MEM_IO_MAX_LEN}");
+    }
+
+    let mut input = Vec::with_capacity(size_of::<PhysMemIoRequest>() + size);
+    let request = PhysMemIoRequest {
+        address,
+        size: size as u32,
+    };
+    input.extend_from_slice(unsafe {
+        core::slice::from_raw_parts(
+            std::ptr::from_ref(&request).cast::<u8>(),
+            size_of::<PhysMemIoRequest>(),
+        )
+    });
+    input.extend_from_slice(&data);
+
+    let mut returned = 0u32;
+    unsafe {
+        DeviceIoControl(
+            *h,
+            IOCTL_WRITE_PHYSICAL,
+            Some(input.as_ptr().cast::<c_void>()),
+            input.len() as u32,
+            None,
+            0,
+            Some(std::ptr::from_mut(&mut returned)),
+            None,
+        )?;
+    }
+    println!("wrote {size} bytes to physical {address:#x}");
     Ok(())
 }
 

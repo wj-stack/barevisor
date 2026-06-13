@@ -4,7 +4,7 @@
 #![no_std]
 
 /// Logical contract version (bump when IOCTL shapes change).
-pub const CONTRACT_VERSION: &str = "0.4.0";
+pub const CONTRACT_VERSION: &str = "0.4.1";
 
 /// `FILE_DEVICE_UNKNOWN` for `CTL_CODE`.
 pub const FILE_DEVICE_UNKNOWN: u32 = 0x0000_0022;
@@ -66,6 +66,14 @@ pub const IOCTL_READ_GVA: u32 = ctl_code(
     FILE_ANY_ACCESS,
 );
 
+/// Writes bytes to a host physical address (`PhysMemIoRequest::address`).
+pub const IOCTL_WRITE_PHYSICAL: u32 = ctl_code(
+    FILE_DEVICE_UNKNOWN,
+    0x908,
+    METHOD_BUFFERED,
+    FILE_ANY_ACCESS,
+);
+
 /// Maximum bytes per read/write IOCTL (must match `hv::hypercall::HV_MEM_IO_MAX_LEN`).
 pub const MEM_IO_MAX_LEN: usize = 4096;
 
@@ -83,6 +91,16 @@ pub const USER_DEVICE_PATH: &str = r"\\.\BarevisorHv";
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MemIoRequest {
     /// Guest virtual address to read from or write to.
+    pub address: u64,
+    /// Number of bytes to transfer (must be `<=` [`MEM_IO_MAX_LEN`]).
+    pub size: u32,
+}
+
+/// Input header for [`IOCTL_WRITE_PHYSICAL`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PhysMemIoRequest {
+    /// Host physical address to write.
     pub address: u64,
     /// Number of bytes to transfer (must be `<=` [`MEM_IO_MAX_LEN`]).
     pub size: u32,

@@ -8,9 +8,13 @@ use shared_contract::{
     TRANSLATE_FAIL_PDPT, TRANSLATE_FAIL_PTE,
 };
 use wdk_sys::{
-    NTSTATUS, NT_SUCCESS,
+    NTSTATUS, NT_SUCCESS, PHYSICAL_ADDRESS,
     ntddk::MmGetPhysicalAddress,
 };
+
+const PAGE_SIZE: usize = 4096;
+/// `MmNonCached` in `MEMORY_CACHING_TYPE`.
+const MM_NON_CACHED: u32 = 0;
 
 const PAGE_PRESENT: u64 = 1 << 0;
 const PAGE_LARGE: u64 = 1 << 7;
@@ -62,6 +66,12 @@ unsafe extern "system" {
         flags: u32,
         number_of_bytes_transferred: *mut usize,
     ) -> NTSTATUS;
+    fn MmMapIoSpace(
+        physical_address: PHYSICAL_ADDRESS,
+        number_of_bytes: usize,
+        cache_type: u32,
+    ) -> *mut c_void;
+    fn MmUnmapIoSpace(base_address: *mut c_void, number_of_bytes: usize);
 }
 
 /// Translates `gva` by switching to `kernel_cr3` and calling `MmGetPhysicalAddress`.
@@ -283,6 +293,55 @@ pub(crate) fn read_hpa(hpa: u64, buffer: *mut u8, size: usize) -> Result<(), NTS
         } else {
             status
         });
+    }
+
+    Ok(())
+}
+
+/// Writes `size` bytes from `buffer` to host physical address `hpa`.
+pub(crate) fn write_hpa(hpa: u64, buffer: *const u8, size: usize) -> Result<(), NTSTATUS> {
+    if buffer.is_null() || size == 0 {
+        return Err(wdk_sys::STATUS_INVALID_PARAMETER);
+    }
+
+    let mut remaining = size;
+    let mut current_pa = hpa;
+    let mut current_buf = buffer;
+
+    while remaining > 0 {
+        let page_offset = (current_pa & 0xFFF) as usize;
+        let chunk = remaining.min(PAGE_SIZE - page_offset);
+        write_hpa_page_chunk(current_pa, unsafe {
+            core::slice::from_raw_parts(current_buf, chunk)
+        })?;
+        remaining -= chunk;
+        current_pa += chunk as u64;
+        current_buf = unsafe { current_buf.add(chunk) };
+    }
+
+    Ok(())
+}
+
+fn write_hpa_page_chunk(hpa: u64, data: &[u8]) -> Result<(), NTSTATUS> {
+    let page_base = hpa & PAGE_MASK;
+    let page_offset = (hpa & 0xFFF) as usize;
+    let map_size = ((page_offset + data.len() + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+
+    let physical_address = PHYSICAL_ADDRESS {
+        QuadPart: page_base as i64,
+    };
+    let mapped = unsafe { MmMapIoSpace(physical_address, map_size, MM_NON_CACHED) };
+    if mapped.is_null() {
+        return Err(wdk_sys::STATUS_UNSUCCESSFUL);
+    }
+
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            data.as_ptr(),
+            mapped.cast::<u8>().add(page_offset),
+            data.len(),
+        );
+        MmUnmapIoSpace(mapped, map_size);
     }
 
     Ok(())
