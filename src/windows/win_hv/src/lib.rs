@@ -5,9 +5,11 @@ extern crate alloc;
 
 mod device;
 mod eprintln;
+mod ept_hook;
 mod ops;
 mod paging;
 mod process;
+mod ssdt;
 
 use alloc::boxed::Box;
 use wdk_sys::{

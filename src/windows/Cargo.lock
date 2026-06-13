@@ -392,6 +392,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "hook_example"
+version = "0.1.0"
+dependencies = [
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "hv"
 version = "0.1.0"
 dependencies = [
@@ -403,9 +410,18 @@ dependencies = [
  "log",
  "num-derive",
  "num-traits",
- "spin",
+ "spin 0.11.0",
  "thiserror",
  "x86",
+]
+
+[[package]]
+name = "iced-x86"
+version = "1.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c447cff8c7f384a7d4f741cfcff32f75f3ad02b406432e8d6c878d56b1edf6b"
+dependencies = [
+ "lazy_static",
 ]
 
 [[package]]
@@ -434,6 +450,9 @@ name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+dependencies = [
+ "spin 0.9.8",
+]
 
 [[package]]
 name = "libc"
@@ -773,11 +792,28 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "spin"
+version = "0.9.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+
+[[package]]
+name = "spin"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "783f3f6f6b01e295a669edfc402133a5f2553d1f0e81284b3ba4594e80bdd4a2"
 dependencies = [
  "lock_api",
+]
+
+[[package]]
+name = "ssdt_hook"
+version = "0.1.0"
+dependencies = [
+ "shared-contract",
+ "spin 0.11.0",
+ "wdk",
+ "wdk-build",
+ "wdk-sys",
 ]
 
 [[package]]
@@ -1013,8 +1049,9 @@ name = "win_hv"
 version = "0.1.0"
 dependencies = [
  "hv",
+ "iced-x86",
  "shared-contract",
- "spin",
+ "spin 0.11.0",
  "wdk",
  "wdk-build",
  "wdk-sys",

@@ -13,6 +13,12 @@ pub const HV_HYPERCALL_READ_MEMORY: u64 = 1;
 /// Writes `size` bytes from guest buffer `buffer_va` to guest virtual address `address`.
 pub const HV_HYPERCALL_WRITE_MEMORY: u64 = 2;
 
+/// Installs an EPT Hook2 mapping (RCX=GPA page base, RDX=fake page HPA).
+pub const HV_HYPERCALL_INSTALL_EPT_HOOK2: u64 = 3;
+
+/// Removes an EPT Hook2 mapping (RCX=GPA page base).
+pub const HV_HYPERCALL_UNINSTALL_EPT_HOOK2: u64 = 4;
+
 /// Returned in RAX when a hypercall succeeds.
 pub const HV_HYPERCALL_SUCCESS: u64 = 0;
 
@@ -111,5 +117,25 @@ pub fn write_memory(address: u64, buffer: *const u8, size: usize) -> bool {
         buffer as u64,
         0,
     );
+    status == HV_HYPERCALL_SUCCESS
+}
+
+/// Installs an EPT Hook2 page hook in the hypervisor.
+#[inline]
+pub fn install_ept_hook2(gpa_page_base: u64, fake_page_hpa: u64) -> bool {
+    let (status, _, _, _) = issue(
+        HV_HYPERCALL_INSTALL_EPT_HOOK2,
+        gpa_page_base,
+        fake_page_hpa,
+        0,
+        0,
+    );
+    status == HV_HYPERCALL_SUCCESS
+}
+
+/// Removes an EPT Hook2 page hook from the hypervisor.
+#[inline]
+pub fn uninstall_ept_hook2(gpa_page_base: u64) -> bool {
+    let (status, _, _, _) = issue(HV_HYPERCALL_UNINSTALL_EPT_HOOK2, gpa_page_base, 0, 0, 0);
     status == HV_HYPERCALL_SUCCESS
 }

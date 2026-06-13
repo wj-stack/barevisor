@@ -1,0 +1,22 @@
+[package]
+name = "hook_example"
+description = "Simple console target for EPT Hook2 testing"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
+
+[[bin]]
+name = "hook_example"
+path = "src/main.rs"

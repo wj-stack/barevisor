@@ -3,7 +3,13 @@
 extend = "target/rust-driver-makefile.toml"
 
 [env]
-CARGO_MAKE_WORKSPACE_SKIP_MEMBERS = ["xtask", "check_hv_vendor", "shared-contract", "win_hv_client"]
+CARGO_MAKE_WORKSPACE_SKIP_MEMBERS = [
+    "xtask",
+    "check_hv_vendor",
+    "hook_example",
+    "shared-contract",
+    "win_hv_client",
+]
 
 [config]
 load_script = '''

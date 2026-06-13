@@ -1,6 +1,6 @@
 [package]
-name = "win_hv"
-description = "Barevisor as a Windows driver"
+name = "ssdt_hook"
+description = "EPT Hook2 example: SSDT NtOpenProcess detour via win_hv IOCTL"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -21,9 +21,7 @@ test = false
 bench = false
 
 [dependencies]
-hv = { path = "../../hvcore" }
 shared-contract = { path = "../shared-contract" }
-iced-x86 = { version = "1.21.0", default-features = false, features = ["decoder", "no_std"] }
 spin = "0.11.0"
 wdk = "0.4.1"
 wdk-sys = "0.5.1"

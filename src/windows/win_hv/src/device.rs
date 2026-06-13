@@ -3,7 +3,9 @@
 use core::mem::size_of;
 
 use shared_contract::{
-    GetCr3ByPidRequest, GetCr3ByPidResponse, IOCTL_GET_CR3_BY_PID, IOCTL_PING,
+    EptHook2Request, EptHook2Response, EptUnhookRequest, GetCr3ByPidRequest, GetCr3ByPidResponse,
+    GetSsdtFunctionRequest, GetSsdtFunctionResponse, GetSsdtResponse, IOCTL_EPT_HOOK2,
+    IOCTL_EPT_UNHOOK, IOCTL_GET_CR3_BY_PID, IOCTL_GET_SSDT, IOCTL_GET_SSDT_FUNCTION, IOCTL_PING,
     IOCTL_READ_GVA, IOCTL_READ_MEMORY, IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY,
     IOCTL_WRITE_PHYSICAL, MEM_IO_MAX_LEN, MemIoRequest, PhysMemIoRequest, PING_RESPONSE_U32,
     ReadGvaRequest, TranslateGvaRequest, TranslateGvaResponse, TRANSLATE_FAIL_CR3,
@@ -99,6 +101,12 @@ unsafe extern "C" fn dispatch_device_control(
         }
         IOCTL_READ_GVA => handle_ioctl_read_gva(irp, input_len, output_len, system_buffer),
         IOCTL_WRITE_PHYSICAL => handle_ioctl_write_physical(irp, input_len, system_buffer),
+        IOCTL_EPT_HOOK2 => handle_ioctl_ept_hook2(irp, input_len, output_len, system_buffer),
+        IOCTL_EPT_UNHOOK => handle_ioctl_ept_unhook(irp, input_len, output_len, system_buffer),
+        IOCTL_GET_SSDT => handle_ioctl_get_ssdt(irp, output_len, system_buffer),
+        IOCTL_GET_SSDT_FUNCTION => {
+            handle_ioctl_get_ssdt_function(irp, input_len, output_len, system_buffer)
+        }
         _ => unsafe { complete_request(irp, STATUS_INVALID_DEVICE_REQUEST, 0) },
     }
 }
@@ -435,7 +443,125 @@ fn handle_ioctl_write_physical(
     unsafe { complete_request(irp, STATUS_SUCCESS, 0) }
 }
 
+fn handle_ioctl_ept_hook2(
+    irp: *mut IRP,
+    input_len: usize,
+    output_len: usize,
+    system_buffer: *mut u8,
+) -> NTSTATUS {
+    if input_len < size_of::<EptHook2Request>() {
+        return unsafe { complete_request(irp, STATUS_INVALID_PARAMETER, 0) };
+    }
+    if output_len < size_of::<EptHook2Response>() {
+        return unsafe { complete_request(irp, STATUS_BUFFER_TOO_SMALL, 0) };
+    }
+    if system_buffer.is_null() {
+        return unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, 0) };
+    }
+
+    let request = unsafe { system_buffer.cast::<EptHook2Request>().read_unaligned() };
+    let response = crate::ept_hook::install(request.process_id, request.target_gva, request.hook_gva);
+    unsafe {
+        system_buffer
+            .cast::<EptHook2Response>()
+            .write_unaligned(response);
+    }
+
+    if response.success == 0 {
+        return unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, size_of::<EptHook2Response>()) };
+    }
+    unsafe { complete_request(irp, STATUS_SUCCESS, size_of::<EptHook2Response>()) }
+}
+
+fn handle_ioctl_get_ssdt(
+    irp: *mut IRP,
+    output_len: usize,
+    system_buffer: *mut u8,
+) -> NTSTATUS {
+    if output_len < size_of::<GetSsdtResponse>() {
+        return unsafe { complete_request(irp, STATUS_BUFFER_TOO_SMALL, 0) };
+    }
+    if system_buffer.is_null() {
+        return unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, 0) };
+    }
+
+    let response = crate::ssdt::get_ssdt_info();
+    unsafe {
+        system_buffer
+            .cast::<GetSsdtResponse>()
+            .write_unaligned(response);
+    }
+    if response.success == 0 {
+        return unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, size_of::<GetSsdtResponse>()) };
+    }
+    unsafe { complete_request(irp, STATUS_SUCCESS, size_of::<GetSsdtResponse>()) }
+}
+
+fn handle_ioctl_get_ssdt_function(
+    irp: *mut IRP,
+    input_len: usize,
+    output_len: usize,
+    system_buffer: *mut u8,
+) -> NTSTATUS {
+    if input_len < size_of::<GetSsdtFunctionRequest>() {
+        return unsafe { complete_request(irp, STATUS_INVALID_PARAMETER, 0) };
+    }
+    if output_len < size_of::<GetSsdtFunctionResponse>() {
+        return unsafe { complete_request(irp, STATUS_BUFFER_TOO_SMALL, 0) };
+    }
+    if system_buffer.is_null() {
+        return unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, 0) };
+    }
+
+    let request = unsafe {
+        system_buffer
+            .cast::<GetSsdtFunctionRequest>()
+            .read_unaligned()
+    };
+    let response = crate::ssdt::resolve_ssdt_function(&request.name);
+    unsafe {
+        system_buffer
+            .cast::<GetSsdtFunctionResponse>()
+            .write_unaligned(response);
+    }
+    if response.success == 0 {
+        return unsafe {
+            complete_request(irp, STATUS_UNSUCCESSFUL, size_of::<GetSsdtFunctionResponse>())
+        };
+    }
+    unsafe { complete_request(irp, STATUS_SUCCESS, size_of::<GetSsdtFunctionResponse>()) }
+}
+
+fn handle_ioctl_ept_unhook(
+    irp: *mut IRP,
+    input_len: usize,
+    output_len: usize,
+    system_buffer: *mut u8,
+) -> NTSTATUS {
+    if input_len < size_of::<EptUnhookRequest>() {
+        return unsafe { complete_request(irp, STATUS_INVALID_PARAMETER, 0) };
+    }
+    if output_len < size_of::<u8>() {
+        return unsafe { complete_request(irp, STATUS_BUFFER_TOO_SMALL, 0) };
+    }
+    if system_buffer.is_null() {
+        return unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, 0) };
+    }
+
+    let request = unsafe { system_buffer.cast::<EptUnhookRequest>().read_unaligned() };
+    let error_code = crate::ept_hook::uninstall(request);
+    unsafe {
+        system_buffer.write_unaligned(error_code);
+    }
+
+    if error_code != 0 {
+        return unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, size_of::<u8>()) };
+    }
+    unsafe { complete_request(irp, STATUS_SUCCESS, size_of::<u8>()) }
+}
+
 extern "C" fn driver_unload(driver: *mut DRIVER_OBJECT) {
+    crate::ept_hook::uninstall_all();
     let mut symlink_buf = [0u16; 96];
     let Some(symlink_used) = encode_utf16z(SYMLINK_NAME, &mut symlink_buf) else {
         return;

@@ -7,9 +7,12 @@ use std::os::windows::ffi::OsStrExt;
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use shared_contract::{
-    GetCr3ByPidRequest, GetCr3ByPidResponse, IOCTL_GET_CR3_BY_PID, IOCTL_PING, IOCTL_READ_GVA,
-    IOCTL_READ_MEMORY, IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY, IOCTL_WRITE_PHYSICAL,
+    EptHook2Request, EptHook2Response, EptUnhookRequest, GetCr3ByPidRequest, GetCr3ByPidResponse,
+    GetSsdtFunctionRequest, GetSsdtFunctionResponse, GetSsdtResponse, IOCTL_EPT_HOOK2,
+    IOCTL_EPT_UNHOOK, IOCTL_GET_CR3_BY_PID, IOCTL_GET_SSDT, IOCTL_GET_SSDT_FUNCTION, IOCTL_PING,
+    IOCTL_READ_GVA, IOCTL_READ_MEMORY, IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY, IOCTL_WRITE_PHYSICAL,
     MEM_IO_MAX_LEN, MemIoRequest, PhysMemIoRequest, PING_RESPONSE_U32, ReadGvaRequest,
+    SSDT_ERR_EXPORT, SSDT_ERR_NAME, SSDT_ERR_NO_MATCH, SSDT_ERR_NOT_FOUND, SSDT_FUNCTION_NAME_MAX,
     TranslateGvaRequest, TranslateGvaResponse, TRANSLATE_FAIL_CR3, TRANSLATE_FAIL_INVALID,
     TRANSLATE_FAIL_MMGPA, TRANSLATE_FAIL_PD, TRANSLATE_FAIL_PML4, TRANSLATE_FAIL_PDPT,
     TRANSLATE_FAIL_PTE, TRANSLATE_METHOD_CR3_SWITCH, TRANSLATE_METHOD_PAGE_WALK, USER_DEVICE_PATH,
@@ -109,6 +112,32 @@ enum Commands {
     },
     /// List kernel CR3 for all processes (enumerated in user mode).
     ListCr3,
+    /// Install an EPT Hook2 inline detour.
+    Hook {
+        /// Target function guest virtual address.
+        #[arg(long)]
+        target: String,
+        /// Detour handler guest virtual address.
+        #[arg(long)]
+        hook: String,
+        #[arg(long, default_value_t = 0)]
+        pid: u32,
+    },
+    /// Remove an EPT Hook2 detour.
+    Unhook {
+        /// Target guest virtual address used when installing the hook.
+        #[arg(long)]
+        target: String,
+        #[arg(long, default_value_t = 0)]
+        pid: u32,
+    },
+    /// Locate `KeServiceDescriptorTable` / shadow SSDT addresses (HyperDbg-style scan).
+    Ssdt,
+    /// Resolve an ntoskrnl SSDT handler by export name.
+    SsdtFn {
+        /// Export name (e.g. `NtOpenProcess`).
+        name: String,
+    },
 }
 
 fn parse_translate_method(input: &str) -> Result<u32, String> {
@@ -151,6 +180,10 @@ fn main() -> anyhow::Result<()> {
         Commands::WritePhys { address, hex } => write_physical(&handle, &address, &hex),
         Commands::Cr3 { pid } => get_cr3(&handle, pid),
         Commands::ListCr3 => list_cr3(&handle),
+        Commands::Hook { target, hook, pid } => ept_hook2(&handle, &target, &hook, pid),
+        Commands::Unhook { target, pid } => ept_unhook(&handle, &target, pid),
+        Commands::Ssdt => get_ssdt(&handle),
+        Commands::SsdtFn { name } => get_ssdt_function(&handle, &name),
     };
     unsafe {
         CloseHandle(handle)?;
@@ -468,6 +501,166 @@ fn write_physical(h: &HANDLE, address: &str, hex_data: &str) -> anyhow::Result<(
         )?;
     }
     println!("wrote {size} bytes to physical {address:#x}");
+    Ok(())
+}
+
+fn ept_hook2(h: &HANDLE, target: &str, hook: &str, pid: u32) -> anyhow::Result<()> {
+    let request = EptHook2Request {
+        process_id: pid,
+        _padding: 0,
+        target_gva: parse_address(target)?,
+        hook_gva: parse_address(hook)?,
+    };
+    let mut response = EptHook2Response::default();
+    let mut returned = 0u32;
+    unsafe {
+        DeviceIoControl(
+            *h,
+            IOCTL_EPT_HOOK2,
+            Some(std::ptr::from_ref(&request).cast::<c_void>()),
+            size_of::<EptHook2Request>() as u32,
+            Some(std::ptr::from_mut(&mut response).cast::<c_void>()),
+            size_of::<EptHook2Response>() as u32,
+            Some(std::ptr::from_mut(&mut returned)),
+            None,
+        )?;
+    }
+    if response.success == 0 {
+        bail!("EPT hook failed: error_code={}", response.error_code);
+    }
+    println!(
+        "hook ok: target_gpa={:#x} trampoline_gva={:#x} patched_len={}",
+        response.target_gpa, response.trampoline_gva, response.patched_len
+    );
+    Ok(())
+}
+
+fn ept_unhook(h: &HANDLE, target: &str, pid: u32) -> anyhow::Result<()> {
+    let request = EptUnhookRequest {
+        target_gva: parse_address(target)?,
+        process_id: pid,
+        _padding: 0,
+    };
+    let mut error_code = 0u8;
+    let mut returned = 0u32;
+    unsafe {
+        DeviceIoControl(
+            *h,
+            IOCTL_EPT_UNHOOK,
+            Some(std::ptr::from_ref(&request).cast::<c_void>()),
+            size_of::<EptUnhookRequest>() as u32,
+            Some(std::ptr::from_mut(&mut error_code).cast::<c_void>()),
+            size_of::<u8>() as u32,
+            Some(std::ptr::from_mut(&mut returned)),
+            None,
+        )?;
+    }
+    if error_code != 0 {
+        bail!("EPT unhook failed: error_code={error_code}");
+    }
+    println!("unhook ok: target={target}");
+    Ok(())
+}
+
+fn ssdt_error_name(code: u8) -> &'static str {
+    match code {
+        SSDT_ERR_NOT_FOUND => "not_found",
+        SSDT_ERR_EXPORT => "export_not_found",
+        SSDT_ERR_NO_MATCH => "no_ssdt_match",
+        SSDT_ERR_NAME => "invalid_name",
+        _ => "unknown",
+    }
+}
+
+fn get_ssdt(h: &HANDLE) -> anyhow::Result<()> {
+    let mut response = GetSsdtResponse::default();
+    let mut returned = 0u32;
+    unsafe {
+        DeviceIoControl(
+            *h,
+            IOCTL_GET_SSDT,
+            None,
+            0,
+            Some(std::ptr::from_mut(&mut response).cast::<c_void>()),
+            size_of::<GetSsdtResponse>() as u32,
+            Some(std::ptr::from_mut(&mut returned)),
+            None,
+        )?;
+    }
+    if returned as usize != size_of::<GetSsdtResponse>() {
+        bail!("IOCTL_GET_SSDT returned {returned} bytes");
+    }
+    if response.success == 0 {
+        bail!(
+            "SSDT lookup failed: error_code={} ({})",
+            response.error_code,
+            ssdt_error_name(response.error_code)
+        );
+    }
+
+    println!("ntoskrnl: base={:#x} size={:#x}", response.ntoskrnl_base, response.ntoskrnl_size);
+    println!(
+        "KeServiceDescriptorTable:        {:#x}",
+        response.ke_service_descriptor_table
+    );
+    println!(
+        "  KiServiceTable:                {:#x}  services={}",
+        response.service_table_base, response.number_of_services
+    );
+    println!(
+        "KeServiceDescriptorTableShadow:  {:#x}",
+        response.ke_service_descriptor_table_shadow
+    );
+    println!(
+        "  shadow[0] KiServiceTable:      {:#x}  services={}",
+        response.shadow_service_table_base, response.shadow_number_of_services
+    );
+    if response.win32k_service_table_base != 0 {
+        println!(
+            "  shadow[1] win32k service table: {:#x}  services={}",
+            response.win32k_service_table_base, response.win32k_number_of_services
+        );
+    }
+    Ok(())
+}
+
+fn get_ssdt_function(h: &HANDLE, name: &str) -> anyhow::Result<()> {
+    if name.is_empty() || name.len() >= SSDT_FUNCTION_NAME_MAX {
+        bail!("export name length must be 1..{SSDT_FUNCTION_NAME_MAX}");
+    }
+
+    let mut request = GetSsdtFunctionRequest::default();
+    request.name[..name.len()].copy_from_slice(name.as_bytes());
+
+    let mut response = GetSsdtFunctionResponse::default();
+    let mut returned = 0u32;
+    unsafe {
+        DeviceIoControl(
+            *h,
+            IOCTL_GET_SSDT_FUNCTION,
+            Some(std::ptr::from_ref(&request).cast::<c_void>()),
+            size_of::<GetSsdtFunctionRequest>() as u32,
+            Some(std::ptr::from_mut(&mut response).cast::<c_void>()),
+            size_of::<GetSsdtFunctionResponse>() as u32,
+            Some(std::ptr::from_mut(&mut returned)),
+            None,
+        )?;
+    }
+    if returned as usize != size_of::<GetSsdtFunctionResponse>() {
+        bail!("IOCTL_GET_SSDT_FUNCTION returned {returned} bytes");
+    }
+    if response.success == 0 {
+        bail!(
+            "SSDT resolve failed for {name}: error_code={} ({})",
+            response.error_code,
+            ssdt_error_name(response.error_code)
+        );
+    }
+
+    println!("{name}:");
+    println!("  syscall_number:   {}", response.syscall_number);
+    println!("  function_address: {:#x}", response.function_address);
+    println!("  export_address:   {:#x}", response.export_address);
     Ok(())
 }
 

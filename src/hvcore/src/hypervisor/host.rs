@@ -9,15 +9,16 @@ use crate::hypervisor::{
     HV_CPUID_INTERFACE, HV_CPUID_VENDOR_AND_MAX_FUNCTIONS, OUR_HV_VENDOR_NAME_EBX,
     OUR_HV_VENDOR_NAME_ECX, OUR_HV_VENDOR_NAME_EDX, apic_id,
     hypercall::{
-        HV_HYPERCALL_INVALID, HV_HYPERCALL_INVALID_PARAMETER, HV_HYPERCALL_PING,
-        HV_HYPERCALL_PING_RESPONSE, HV_HYPERCALL_READ_MEMORY, HV_HYPERCALL_SUCCESS,
-        HV_HYPERCALL_WRITE_MEMORY, HV_MEM_IO_MAX_LEN,
+        HV_HYPERCALL_INSTALL_EPT_HOOK2, HV_HYPERCALL_INVALID, HV_HYPERCALL_INVALID_PARAMETER,
+        HV_HYPERCALL_PING, HV_HYPERCALL_PING_RESPONSE, HV_HYPERCALL_READ_MEMORY,
+        HV_HYPERCALL_SUCCESS, HV_HYPERCALL_UNINSTALL_EPT_HOOK2, HV_HYPERCALL_WRITE_MEMORY,
+        HV_MEM_IO_MAX_LEN,
     },
     registers::Registers,
     x86_instructions::{cr4, cr4_write, rdmsr, wrmsr, xsetbv},
 };
 
-use super::{amd::Amd, intel::Intel};
+use super::{amd::Amd, intel::{self, Intel}};
 
 /// The entry point of the hypervisor.
 pub(crate) fn main(registers: &Registers) -> ! {
@@ -71,6 +72,20 @@ fn virtualize_core<Arch: Architecture>(registers: &Registers) -> ! {
             VmExitReason::Wrmsr(info) => handle_wrmsr(guest, &info),
             VmExitReason::XSetBv(info) => handle_xsetbv(guest, &info),
             VmExitReason::VmCall(info) => handle_vmcall(guest, &info),
+            VmExitReason::EptViolation(vcpu_id) => {
+                if !intel::ept_hook::handle_ept_violation(
+                    vcpu_id,
+                    intel::guest::vmcs_exit_qualification(),
+                    intel::guest::vmcs_guest_physical_address(),
+                ) {
+                    log::error!("Unexpected EPT violation");
+                }
+            }
+            VmExitReason::MonitorTrapFlag(vcpu_id) => {
+                if !intel::ept_hook::handle_mtf(vcpu_id) {
+                    log::error!("Unexpected MTF VM-exit");
+                }
+            }
             VmExitReason::InitSignal | VmExitReason::StartupIpi | VmExitReason::NestedPageFault => {
             }
         }
@@ -173,6 +188,8 @@ fn handle_vmcall<T: Guest>(guest: &mut T, info: &InstructionInfo) {
         HV_HYPERCALL_READ_MEMORY | HV_HYPERCALL_WRITE_MEMORY => {
             handle_memory_hypercall(guest, hypercall)
         }
+        HV_HYPERCALL_INSTALL_EPT_HOOK2 => handle_install_ept_hook2(guest),
+        HV_HYPERCALL_UNINSTALL_EPT_HOOK2 => handle_uninstall_ept_hook2(guest),
         _ => HV_HYPERCALL_INVALID,
     };
 
@@ -210,8 +227,49 @@ fn handle_memory_hypercall<T: Guest>(guest: &mut T, hypercall: u64) -> u64 {
     HV_HYPERCALL_SUCCESS
 }
 
+fn handle_install_ept_hook2<T: Guest>(guest: &mut T) -> u64 {
+    if !is_intel_processor() {
+        return HV_HYPERCALL_INVALID;
+    }
+    let gpa_page_base = guest.regs().rcx & !0xFFF;
+    let fake_page_hpa = guest.regs().rdx & !0xFFF;
+    if gpa_page_base == 0 || fake_page_hpa == 0 {
+        return HV_HYPERCALL_INVALID_PARAMETER;
+    }
+
+    match intel::ept_hook::install(
+        &mut intel::guest::ept_state().lock(),
+        gpa_page_base,
+        fake_page_hpa,
+    ) {
+        Ok(()) => HV_HYPERCALL_SUCCESS,
+        Err(_) => HV_HYPERCALL_INVALID_PARAMETER,
+    }
+}
+
+fn handle_uninstall_ept_hook2<T: Guest>(guest: &mut T) -> u64 {
+    if !is_intel_processor() {
+        return HV_HYPERCALL_INVALID;
+    }
+    let gpa_page_base = guest.regs().rcx & !0xFFF;
+    if gpa_page_base == 0 {
+        return HV_HYPERCALL_INVALID_PARAMETER;
+    }
+
+    match intel::ept_hook::uninstall(&mut intel::guest::ept_state().lock(), gpa_page_base) {
+        Ok(()) => HV_HYPERCALL_SUCCESS,
+        Err(_) => HV_HYPERCALL_INVALID_PARAMETER,
+    }
+}
+
 fn is_canonical_va(address: u64) -> bool {
     address <= 0x0000_7FFF_FFFF_FFFF || address >= 0xFFFF_8000_0000_0000
+}
+
+fn is_intel_processor() -> bool {
+    x86::cpuid::CpuId::new()
+        .get_vendor_info()
+        .is_some_and(|vendor| vendor.as_str() == "GenuineIntel")
 }
 
 /// Represents a processor architecture that implements hardware-assisted virtualization.
@@ -254,6 +312,8 @@ pub(crate) enum VmExitReason {
     Wrmsr(InstructionInfo),
     XSetBv(InstructionInfo),
     VmCall(InstructionInfo),
+    EptViolation(usize),
+    MonitorTrapFlag(usize),
     InitSignal,
     StartupIpi,
     NestedPageFault,

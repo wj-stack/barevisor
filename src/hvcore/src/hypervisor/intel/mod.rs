@@ -4,8 +4,9 @@
 
 use super::host::Architecture;
 
+pub(crate) mod ept_hook;
 mod epts;
-mod guest;
+pub(crate) mod guest;
 mod mtrr;
 mod vmx;
 

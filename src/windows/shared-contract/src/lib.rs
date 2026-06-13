@@ -4,7 +4,7 @@
 #![no_std]
 
 /// Logical contract version (bump when IOCTL shapes change).
-pub const CONTRACT_VERSION: &str = "0.4.1";
+pub const CONTRACT_VERSION: &str = "0.6.0";
 
 /// `FILE_DEVICE_UNKNOWN` for `CTL_CODE`.
 pub const FILE_DEVICE_UNKNOWN: u32 = 0x0000_0022;
@@ -70,6 +70,38 @@ pub const IOCTL_READ_GVA: u32 = ctl_code(
 pub const IOCTL_WRITE_PHYSICAL: u32 = ctl_code(
     FILE_DEVICE_UNKNOWN,
     0x908,
+    METHOD_BUFFERED,
+    FILE_ANY_ACCESS,
+);
+
+/// Installs an EPT Hook2 inline detour at `EptHook2Request::target_gva`.
+pub const IOCTL_EPT_HOOK2: u32 = ctl_code(
+    FILE_DEVICE_UNKNOWN,
+    0x909,
+    METHOD_BUFFERED,
+    FILE_ANY_ACCESS,
+);
+
+/// Removes an EPT Hook2 installed at `EptUnhookRequest::target_gva`.
+pub const IOCTL_EPT_UNHOOK: u32 = ctl_code(
+    FILE_DEVICE_UNKNOWN,
+    0x90A,
+    METHOD_BUFFERED,
+    FILE_ANY_ACCESS,
+);
+
+/// Returns `KeServiceDescriptorTable` / shadow table addresses (HyperDbg-style scan).
+pub const IOCTL_GET_SSDT: u32 = ctl_code(
+    FILE_DEVICE_UNKNOWN,
+    0x90B,
+    METHOD_BUFFERED,
+    FILE_ANY_ACCESS,
+);
+
+/// Resolves an ntoskrnl SSDT handler by export name (`GetSsdtFunctionRequest::name`).
+pub const IOCTL_GET_SSDT_FUNCTION: u32 = ctl_code(
+    FILE_DEVICE_UNKNOWN,
+    0x90C,
     METHOD_BUFFERED,
     FILE_ANY_ACCESS,
 );
@@ -189,6 +221,155 @@ pub struct TranslateGvaResponse {
     pub gpa: u64,
     /// Host physical address.
     pub hpa: u64,
+}
+
+/// Invalid parameter for [`IOCTL_EPT_HOOK2`] / [`IOCTL_EPT_UNHOOK`].
+pub const EPT_HOOK2_ERR_INVALID: u8 = 1;
+/// CR3 / process lookup failed.
+pub const EPT_HOOK2_ERR_CR3: u8 = 2;
+/// GVA→GPA translation failed.
+pub const EPT_HOOK2_ERR_TRANSLATE: u8 = 3;
+/// GPA is outside the supported identity EPT range (< 512 GB).
+pub const EPT_HOOK2_ERR_GPA_RANGE: u8 = 4;
+/// The target page is already hooked.
+pub const EPT_HOOK2_ERR_ALREADY_HOOKED: u8 = 5;
+/// Instruction length / disassembly failed.
+pub const EPT_HOOK2_ERR_DISASM: u8 = 6;
+/// Hook patch would cross a page boundary.
+pub const EPT_HOOK2_ERR_PAGE_BOUNDARY: u8 = 7;
+/// Pool allocation failed.
+pub const EPT_HOOK2_ERR_ALLOC: u8 = 8;
+/// Hypervisor rejected the install/uninstall request.
+pub const EPT_HOOK2_ERR_HYPERVISOR: u8 = 9;
+/// CPU lacks EPT execute-only support.
+pub const EPT_HOOK2_ERR_NO_EXEC_ONLY: u8 = 10;
+/// No hook registered for the given address.
+pub const EPT_HOOK2_ERR_NOT_FOUND: u8 = 11;
+
+/// Input for [`IOCTL_EPT_HOOK2`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EptHook2Request {
+    /// Target process ID (`0` = use the current CR3).
+    pub process_id: u32,
+    /// Reserved; must be zero.
+    pub _padding: u32,
+    /// Guest virtual address of the function to hook.
+    pub target_gva: u64,
+    /// Guest virtual address of the detour handler.
+    pub hook_gva: u64,
+}
+
+/// Output for [`IOCTL_EPT_HOOK2`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EptHook2Response {
+    /// `1` on success, otherwise `0`.
+    pub success: u8,
+    /// [`EPT_HOOK2_ERR_*`] on failure.
+    pub error_code: u8,
+    /// Bytes overwritten in the fake executable page.
+    pub patched_len: u8,
+    /// Reserved; must be zero.
+    pub _padding: u8,
+    /// Kernel VA of the trampoline (original-call gateway).
+    pub trampoline_gva: u64,
+    /// Page-aligned guest physical address of the hooked page.
+    pub target_gpa: u64,
+}
+
+/// Input for [`IOCTL_EPT_UNHOOK`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EptUnhookRequest {
+    /// Guest virtual address used when the hook was installed.
+    pub target_gva: u64,
+    /// Target process ID (`0` = use the current CR3).
+    pub process_id: u32,
+    /// Reserved; must be zero.
+    pub _padding: u32,
+}
+
+/// SSDT scan failed (ntoskrnl not found or pattern missing).
+pub const SSDT_ERR_NOT_FOUND: u8 = 1;
+/// Export name not found via `MmGetSystemRoutineAddress`.
+pub const SSDT_ERR_EXPORT: u8 = 2;
+/// No SSDT entry matched the export address.
+pub const SSDT_ERR_NO_MATCH: u8 = 3;
+/// Request export name is empty or too long.
+pub const SSDT_ERR_NAME: u8 = 4;
+
+/// Output for [`IOCTL_GET_SSDT`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GetSsdtResponse {
+    /// `1` on success, otherwise `0`.
+    pub success: u8,
+    /// [`SSDT_ERR_*`] on failure.
+    pub error_code: u8,
+    /// Reserved; must be zero.
+    pub _padding: [u8; 6],
+    /// `ntoskrnl.exe` image base.
+    pub ntoskrnl_base: u64,
+    /// `ntoskrnl.exe` image size.
+    pub ntoskrnl_size: u32,
+    /// Reserved; must be zero.
+    pub _padding2: u32,
+    /// Kernel VA of `KeServiceDescriptorTable`.
+    pub ke_service_descriptor_table: u64,
+    /// `KiServiceTable` (native SSDT) from entry `[0]`.
+    pub service_table_base: u64,
+    /// Number of native system services.
+    pub number_of_services: u32,
+    /// Reserved; must be zero.
+    pub _padding3: u32,
+    /// Kernel VA of `KeServiceDescriptorTableShadow`.
+    pub ke_service_descriptor_table_shadow: u64,
+    /// Shadow entry `[0]` service table (copy of native SSDT).
+    pub shadow_service_table_base: u64,
+    /// Shadow entry `[0]` service count.
+    pub shadow_number_of_services: u32,
+    /// Shadow entry `[1]` service count (win32k), `0` when absent.
+    pub win32k_number_of_services: u32,
+    /// Shadow entry `[1]` service table (`win32k!W32pServiceTable`), `0` when absent.
+    pub win32k_service_table_base: u64,
+}
+
+/// Maximum export name length for [`IOCTL_GET_SSDT_FUNCTION`] (UTF-8 bytes, NUL excluded).
+pub const SSDT_FUNCTION_NAME_MAX: usize = 64;
+
+/// Input for [`IOCTL_GET_SSDT_FUNCTION`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GetSsdtFunctionRequest {
+    /// NUL-terminated ASCII export name (e.g. `NtOpenProcess`).
+    pub name: [u8; SSDT_FUNCTION_NAME_MAX],
+}
+
+impl Default for GetSsdtFunctionRequest {
+    fn default() -> Self {
+        Self {
+            name: [0; SSDT_FUNCTION_NAME_MAX],
+        }
+    }
+}
+
+/// Output for [`IOCTL_GET_SSDT_FUNCTION`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GetSsdtFunctionResponse {
+    /// `1` on success, otherwise `0`.
+    pub success: u8,
+    /// [`SSDT_ERR_*`] on failure.
+    pub error_code: u8,
+    /// Reserved; must be zero.
+    pub _padding: [u8; 6],
+    /// SSDT syscall index for the matched handler.
+    pub syscall_number: u32,
+    /// Kernel VA of the handler (from SSDT decode).
+    pub function_address: u64,
+    /// Ground-truth address from `MmGetSystemRoutineAddress`.
+    pub export_address: u64,
 }
 
 /// Input for [`IOCTL_READ_GVA`].

@@ -1,5 +1,12 @@
 [workspace]
-members = ["check_hv_vendor", "shared-contract", "win_hv", "win_hv_client"]
+members = [
+    "check_hv_vendor",
+    "hook_example",
+    "shared-contract",
+    "ssdt_hook",
+    "win_hv",
+    "win_hv_client",
+]
 resolver = "2"
 
 [workspace.package]

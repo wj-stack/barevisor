@@ -29,7 +29,7 @@ use crate::hypervisor::{
     x86_instructions::{cr0, cr3, cr4, lar, ldtr, lsl, rdmsr, sgdt, sidt, tr, write_cr2},
 };
 
-use super::epts::Epts;
+use super::epts::EptState;
 
 /// Representation of a guest.
 pub(crate) struct VmxGuest {
@@ -93,6 +93,8 @@ impl Guest for VmxGuest {
         const VMX_EXIT_REASON_WRMSR: u16 = 32;
         const VMX_EXIT_REASON_XSETBV: u16 = 55;
         const VMX_EXIT_REASON_VMCALL: u16 = 18;
+        const VMX_EXIT_REASON_EPT_VIOLATION: u16 = 48;
+        const VMX_EXIT_REASON_MTF: u16 = 37;
 
         vmwrite(vmcs::guest::RIP, self.registers.rip);
         vmwrite(vmcs::guest::RSP, self.registers.rsp);
@@ -135,6 +137,8 @@ impl Guest for VmxGuest {
             VMX_EXIT_REASON_VMCALL => VmExitReason::VmCall(InstructionInfo {
                 next_rip: self.registers.rip + vmread(vmcs::ro::VMEXIT_INSTRUCTION_LEN),
             }),
+            VMX_EXIT_REASON_EPT_VIOLATION => VmExitReason::EptViolation(self.id),
+            VMX_EXIT_REASON_MTF => VmExitReason::MonitorTrapFlag(self.id),
             _ => {
                 log::error!("{:#x?}", self.vmcs);
                 panic!(
@@ -220,7 +224,7 @@ impl VmxGuest {
         let msr_bitmaps_va = SHARED_GUEST_DATA.msr_bitmaps.as_ref() as *const _;
         let msr_bitmaps_pa = platform_ops::get().pa(msr_bitmaps_va as *const _);
         vmwrite(vmcs::control::MSR_BITMAPS_ADDR_FULL, msr_bitmaps_pa);
-        vmwrite(vmcs::control::EPTP_FULL, SHARED_GUEST_DATA.epts.eptp().0);
+        vmwrite(vmcs::control::EPTP_FULL, SHARED_GUEST_DATA.ept.lock().eptp().0);
     }
 
     /// Initializes the guest-state fields of the VMCS.
@@ -376,7 +380,7 @@ impl VmxGuest {
 
     /// Returns the VM control value that is adjusted in consideration with the
     /// VMX capability MSR.
-    fn adjust_vmx_control(control: VmxControl, requested_value: u64) -> u64 {
+    pub(crate) fn adjust_vmx_control(control: VmxControl, requested_value: u64) -> u64 {
         const IA32_VMX_BASIC_VMX_CONTROLS_FLAG: u64 = 1 << 55;
 
         // This determines the right VMX capability MSR based on the value of
@@ -640,17 +644,37 @@ impl VmxGuest {
 
 struct SharedGuestData {
     msr_bitmaps: Box<Page>,
-    epts: Box<Epts>,
+    ept: spin::Mutex<EptState>,
 }
 
-static SHARED_GUEST_DATA: LazyLock<SharedGuestData> = LazyLock::new(|| {
-    let mut epts = zeroed_box::<Epts>();
-    epts.build_identity();
+pub(crate) fn ept_state() -> &'static spin::Mutex<EptState> {
+    &SHARED_GUEST_DATA.ept
+}
 
-    SharedGuestData {
-        msr_bitmaps: zeroed_box::<Page>(),
-        epts,
-    }
+pub(crate) fn vmcs_exit_qualification() -> u64 {
+    vmread(vmcs::ro::EXIT_QUALIFICATION)
+}
+
+pub(crate) fn vmcs_guest_physical_address() -> u64 {
+    vmread(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL)
+}
+
+pub(crate) fn set_monitor_trap_flag(enabled: bool) {
+    let current = vmread(vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS);
+    let requested = if enabled {
+        current | vmcs::control::PrimaryControls::MONITOR_TRAP_FLAG.bits() as u64
+    } else {
+        current & !(vmcs::control::PrimaryControls::MONITOR_TRAP_FLAG.bits() as u64)
+    };
+    vmwrite(
+        vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS,
+        VmxGuest::adjust_vmx_control(VmxControl::ProcessorBased, requested),
+    );
+}
+
+static SHARED_GUEST_DATA: LazyLock<SharedGuestData> = LazyLock::new(|| SharedGuestData {
+    msr_bitmaps: zeroed_box::<Page>(),
+    ept: spin::Mutex::new(EptState::new()),
 });
 
 unsafe extern "C" {
@@ -662,7 +686,7 @@ global_asm!(include_str!("run_guest.S"));
 
 #[expect(dead_code)]
 #[derive(Clone, Copy, Debug)]
-enum VmxControl {
+pub(crate) enum VmxControl {
     PinBased,
     ProcessorBased,
     ProcessorBased2,
