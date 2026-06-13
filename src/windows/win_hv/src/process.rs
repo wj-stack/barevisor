@@ -16,9 +16,11 @@ unsafe extern "system" {
 
 /// Returns kernel CR3 (`DirectoryTableBase`) for `process_id`.
 pub(crate) fn get_kernel_cr3(process_id: u32) -> Result<u64, NTSTATUS> {
+    crate::eprintln!("process: get_kernel_cr3 pid={process_id}");
     let process = lookup_process(process_id)?;
     let cr3 = read_u64_at(process, DIRECTORY_TABLE_BASE_OFFSET);
     unsafe { ObDereferenceObject(process.cast()) };
+    crate::eprintln!("process: pid={process_id} cr3={cr3:#x}");
     Ok(cr3)
 }
 
@@ -61,6 +63,9 @@ fn lookup_process(process_id: u32) -> Result<PEPROCESS, NTSTATUS> {
     let mut process: PEPROCESS = core::ptr::null_mut();
     let status = unsafe { PsLookupProcessByProcessId(process_id as HANDLE, &raw mut process) };
     if !NT_SUCCESS(status) {
+        crate::eprintln!(
+            "process: PsLookupProcessByProcessId pid={process_id} failed status={status:#010x}"
+        );
         return Err(if status == STATUS_NOT_FOUND {
             STATUS_NOT_FOUND
         } else {

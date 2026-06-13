@@ -1,7 +1,6 @@
 use core::ptr::addr_of;
 
 use alloc::boxed::Box;
-use alloc::vec::Vec;
 use x86::bits64::paging::{
     BASE_PAGE_SHIFT, BASE_PAGE_SIZE, HUGE_PAGE_SIZE, LARGE_PAGE_SIZE, PML4_SLOT_SIZE,
 };
@@ -10,10 +9,17 @@ use crate::{hypervisor::intel::mtrr::MemoryType, hypervisor::platform_ops, hyper
 
 use super::mtrr::Mtrr;
 
-/// Identity-mapped EPT state with optional runtime 2 MB → 4 KB splits.
+/// Maximum 2 MB → 4 KB splits (matches HyperDbg pre-allocated pool sizing).
+pub(crate) const MAX_EPT_DYNAMIC_SPLITS: usize = 16;
+
+/// Identity-mapped EPT state with pre-allocated runtime 2 MB → 4 KB splits.
 pub(crate) struct EptState {
     pub tables: Box<Epts>,
-    dynamic_pts: Vec<Box<EptPageTable>>,
+    /// Pre-allocated 4 KB page tables (HyperDbg `VMM_EPT_DYNAMIC_SPLIT.PML1` pool).
+    /// Heap-backed via `zeroed_box` so `EptState::new` does not touch the ~64 KiB host stack.
+    split_pages: Box<[EptPageTable; MAX_EPT_DYNAMIC_SPLITS]>,
+    split_pde_keys: [Option<(usize, usize)>; MAX_EPT_DYNAMIC_SPLITS],
+    free_splits: [bool; MAX_EPT_DYNAMIC_SPLITS],
 }
 
 impl EptState {
@@ -22,7 +28,9 @@ impl EptState {
         tables.build_identity();
         Self {
             tables,
-            dynamic_pts: Vec::new(),
+            split_pages: zeroed_box(),
+            split_pde_keys: [None; MAX_EPT_DYNAMIC_SPLITS],
+            free_splits: [true; MAX_EPT_DYNAMIC_SPLITS],
         }
     }
 
@@ -49,24 +57,39 @@ impl EptState {
             return Ok(());
         }
 
-        let base_pa = pde.pfn() << 12;
+        let split_index = self
+            .free_splits
+            .iter()
+            .position(|free| *free)
+            .ok_or(EptError::NoSplitSlots)?;
+
+        let pfn_2mb = pde.pfn();
         let memory_type = pde.memory_type();
         let readable = pde.readable();
         let writable = pde.writable();
         let executable = pde.executable();
 
-        let mut new_pt = EptPageTable::zeroed();
-        for (i, pte) in new_pt.entries.iter_mut().enumerate() {
-            let page_pa = base_pa + (i as u64) * BASE_PAGE_SIZE as u64;
+        // HyperDbg: ((PageFrameNumber * SIZE_2_MB) / PAGE_SIZE) + EntryIndex
+        // Our 2 MB entries store pfn = region_pa >> 12 (low 9 bits zero when 2 MB aligned),
+        // which equals (region_pa >> 21) << 9, so child pfn = pfn_2mb + index.
+        let mtrr = Mtrr::new();
+        let page_table = &mut self.split_pages[split_index];
+        for (i, pte) in page_table.entries.iter_mut().enumerate() {
+            let page_pfn = pfn_2mb + i as u64;
+            let page_pa = page_pfn << BASE_PAGE_SHIFT;
+            let page_memory_type = mtrr
+                .find(page_pa..page_pa + BASE_PAGE_SIZE as u64)
+                .unwrap_or(MemoryType::Uncachable);
             pte.set_readable(readable);
             pte.set_writable(writable);
             pte.set_executable(executable);
-            pte.set_memory_type(memory_type);
-            pte.set_pfn(page_pa >> BASE_PAGE_SHIFT);
+            pte.set_memory_type(page_memory_type as u64);
+            pte.set_pfn(page_pfn);
         }
+        self.split_pde_keys[split_index] = Some((pdpt_index, pd_index));
+        self.free_splits[split_index] = false;
 
-        let pt_pa = platform_ops::get().pa(addr_of!(new_pt) as *const _);
-        self.dynamic_pts.push(Box::new(new_pt));
+        let pt_pa = platform_ops::get().pa(addr_of!(self.split_pages[split_index]) as *const _);
 
         pde.set_large(false);
         pde.set_memory_type(memory_type);
@@ -98,9 +121,9 @@ impl EptState {
             return Ok(&mut self.tables.pt.entries[pt_index]);
         }
 
-        for pt in &mut self.dynamic_pts {
-            if platform_ops::get().pa(addr_of!(*pt) as *const _) == pt_pa {
-                return Ok(&mut pt.entries[pt_index]);
+        for (index, key) in self.split_pde_keys.iter().enumerate() {
+            if *key == Some((pdpt_index, pd_index)) {
+                return Ok(&mut self.split_pages[index].entries[pt_index]);
             }
         }
 
@@ -113,6 +136,7 @@ pub(crate) enum EptError {
     OutOfRange,
     InvalidAddress,
     NotSplit,
+    NoSplitSlots,
 }
 
 #[repr(C, align(4096))]
@@ -258,6 +282,7 @@ bitfield::bitfield! {
 }
 
 impl EptEntry {
+    /// Builds an execute-only fake-page PTE (HyperDbg `ChangedEntry` for !epthook2).
     pub(crate) fn as_execute_only_fake(original: Self, fake_page_hpa: u64) -> Self {
         let mut entry = original;
         entry.set_readable(false);
@@ -287,12 +312,4 @@ struct Pd {
 #[repr(C, align(4096))]
 struct EptPageTable {
     entries: [EptEntry; 512],
-}
-
-impl EptPageTable {
-    fn zeroed() -> Self {
-        Self {
-            entries: [EptEntry::default(); 512],
-        }
-    }
 }

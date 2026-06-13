@@ -237,11 +237,8 @@ fn handle_install_ept_hook2<T: Guest>(guest: &mut T) -> u64 {
         return HV_HYPERCALL_INVALID_PARAMETER;
     }
 
-    match intel::ept_hook::install(
-        &mut intel::guest::ept_state().lock(),
-        gpa_page_base,
-        fake_page_hpa,
-    ) {
+    let mut ept = intel::guest::ept_state().lock();
+    match intel::ept_hook::install(&mut ept, gpa_page_base, fake_page_hpa) {
         Ok(()) => HV_HYPERCALL_SUCCESS,
         Err(_) => HV_HYPERCALL_INVALID_PARAMETER,
     }
@@ -256,7 +253,8 @@ fn handle_uninstall_ept_hook2<T: Guest>(guest: &mut T) -> u64 {
         return HV_HYPERCALL_INVALID_PARAMETER;
     }
 
-    match intel::ept_hook::uninstall(&mut intel::guest::ept_state().lock(), gpa_page_base) {
+    let mut ept = intel::guest::ept_state().lock();
+    match intel::ept_hook::uninstall(&mut ept, gpa_page_base) {
         Ok(()) => HV_HYPERCALL_SUCCESS,
         Err(_) => HV_HYPERCALL_INVALID_PARAMETER,
     }

@@ -282,8 +282,8 @@ pub const EPT_HOOK2_ERR_NOT_FOUND: u8 = 11;
 pub struct EptHook2Request {
     /// Target process ID (`0` = use the current CR3).
     pub process_id: u32,
-    /// Reserved; must be zero.
-    pub _padding: u32,
+    /// SSDT syscall index for synthesized trampoline (`0` = auto-detect stub at target).
+    pub syscall_number: u32,
     /// Guest virtual address of the function to hook.
     pub target_gva: u64,
     /// Guest virtual address of the detour handler.

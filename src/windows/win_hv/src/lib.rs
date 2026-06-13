@@ -6,6 +6,7 @@ extern crate alloc;
 mod device;
 mod eprintln;
 mod ept_hook;
+mod hook_log;
 mod ops;
 mod paging;
 mod process;
@@ -39,9 +40,11 @@ extern "C" fn driver_entry(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     hv::allocator::init(ptr.cast::<u8>());
+    eprintln!("Allocator initialized at {ptr:p}");
 
     // Register the platform specific API.
     hv::platform_ops::init(Box::new(ops::WindowsOps));
+    eprintln!("PlatformOps registered");
 
     let status = device::create_device(driver);
     if !wdk::nt_success(status) {
@@ -52,7 +55,9 @@ extern "C" fn driver_entry(
     // Virtualize the system. No `SharedHostData` is given, meaning that host's
     // IDT, GDT, TSS and page tables are all that of the system process (PID=4).
     // This makes the host debuggable with Windbg but also breakable from CPL0.
+    eprintln!("Virtualizing system...");
     hv::virtualize_system(hv::SharedHostData::default());
+    eprintln!("virtualize_system done");
 
     if hv::hypercall::ping() {
         eprintln!("HV_HYPERCALL_PING succeeded");

@@ -18,6 +18,7 @@ use wdk_sys::{
 };
 
 use crate::eprintln;
+use crate::hook_log::{ept_hook_err_name, ioctl_name, ssdt_err_name, translate_fail_stage};
 
 const IRP_MJ_CREATE_INDEX: usize = 0x00;
 const IRP_MJ_CLOSE_INDEX: usize = 0x02;
@@ -49,6 +50,11 @@ fn to_unicode_string(buffer: &mut [u16], used_with_nul: usize) -> UNICODE_STRING
         MaximumLength: (used_with_nul * size_of::<u16>()) as u16,
         Buffer: buffer.as_mut_ptr(),
     }
+}
+
+fn c_str_preview(bytes: &[u8]) -> &str {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    core::str::from_utf8(&bytes[..end]).unwrap_or("<invalid>")
 }
 
 unsafe fn complete_request(irp: *mut IRP, status: NTSTATUS, info: usize) -> NTSTATUS {
@@ -89,6 +95,14 @@ unsafe extern "C" fn dispatch_device_control(
     let output_len = device_io_control.OutputBufferLength as usize;
     let system_buffer = unsafe { (*irp).AssociatedIrp.SystemBuffer.cast::<u8>() };
 
+    eprintln!(
+        "IOCTL {} ({:#x}) in={} out={}",
+        ioctl_name(ioctl_code),
+        ioctl_code,
+        input_len,
+        output_len
+    );
+
     match ioctl_code {
         IOCTL_PING => handle_ioctl_ping(irp, output_len, system_buffer),
         IOCTL_READ_MEMORY => handle_ioctl_read_memory(irp, input_len, output_len, system_buffer),
@@ -107,7 +121,10 @@ unsafe extern "C" fn dispatch_device_control(
         IOCTL_GET_SSDT_FUNCTION => {
             handle_ioctl_get_ssdt_function(irp, input_len, output_len, system_buffer)
         }
-        _ => unsafe { complete_request(irp, STATUS_INVALID_DEVICE_REQUEST, 0) },
+        _ => {
+            eprintln!("IOCTL unknown: {ioctl_code:#x}");
+            unsafe { complete_request(irp, STATUS_INVALID_DEVICE_REQUEST, 0) }
+        }
     }
 }
 
@@ -125,8 +142,10 @@ fn handle_ioctl_ping(irp: *mut IRP, output_len: usize, system_buffer: *mut u8) -
                 .cast::<u32>()
                 .write_unaligned(PING_RESPONSE_U32);
         }
+        eprintln!("IOCTL_PING ok");
         unsafe { complete_request(irp, STATUS_SUCCESS, size_of::<u32>()) }
     } else {
+        eprintln!("IOCTL_PING failed: hypervisor ping");
         unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, 0) }
     }
 }
@@ -147,6 +166,7 @@ fn handle_ioctl_read_memory(
     let request = unsafe { system_buffer.cast::<MemIoRequest>().read_unaligned() };
     let size = request.size as usize;
     if size == 0 || size > MEM_IO_MAX_LEN {
+        eprintln!("IOCTL_READ_MEMORY: invalid size={size}");
         return unsafe { complete_request(irp, STATUS_INVALID_PARAMETER, 0) };
     }
     if output_len < size {
@@ -154,8 +174,14 @@ fn handle_ioctl_read_memory(
     }
 
     if !hv::hypercall::read_memory(request.address, system_buffer, size) {
+        eprintln!(
+            "IOCTL_READ_MEMORY failed: addr={:#x} size={size}",
+            request.address
+        );
         return unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, 0) };
     }
+
+    eprintln!("IOCTL_READ_MEMORY ok: addr={:#x} size={size}", request.address);
 
     unsafe { complete_request(irp, STATUS_SUCCESS, size) }
 }
@@ -183,8 +209,14 @@ fn handle_ioctl_write_memory(
 
     let data = unsafe { system_buffer.add(size_of::<MemIoRequest>()) };
     if !hv::hypercall::write_memory(request.address, data, size) {
+        eprintln!(
+            "IOCTL_WRITE_MEMORY failed: addr={:#x} size={size}",
+            request.address
+        );
         return unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, 0) };
     }
+
+    eprintln!("IOCTL_WRITE_MEMORY ok: addr={:#x} size={size}", request.address);
 
     unsafe { complete_request(irp, STATUS_SUCCESS, 0) }
 }
@@ -210,17 +242,24 @@ fn handle_ioctl_get_cr3_by_pid(
             .cast::<GetCr3ByPidRequest>()
             .read_unaligned()
     };
+    eprintln!("IOCTL_GET_CR3_BY_PID: pid={}", request.process_id);
     let response = match crate::process::get_kernel_cr3(request.process_id) {
-        Ok(cr3) => GetCr3ByPidResponse {
-            found: 1,
-            _padding: [0; 7],
-            cr3,
-        },
-        Err(_) => GetCr3ByPidResponse {
-            found: 0,
-            _padding: [0; 7],
-            cr3: 0,
-        },
+        Ok(cr3) => {
+            eprintln!("IOCTL_GET_CR3_BY_PID ok: cr3={cr3:#x}");
+            GetCr3ByPidResponse {
+                found: 1,
+                _padding: [0; 7],
+                cr3,
+            }
+        }
+        Err(status) => {
+            eprintln!("IOCTL_GET_CR3_BY_PID failed: status={status:#010x}");
+            GetCr3ByPidResponse {
+                found: 0,
+                _padding: [0; 7],
+                cr3: 0,
+            }
+        }
     };
 
     unsafe {
@@ -261,6 +300,10 @@ fn translate_gva(process_id: u32, method: u32, cr3: u64, gva: u64) -> TranslateG
     match crate::paging::gva_to_gpa_walk(cr3, gva) {
         Ok(walk) => {
             let gpa = walk.gpa;
+            eprintln!(
+                "translate_gva: walk ok pid={process_id} gva={gva:#x} gpa={gpa:#x} level={}",
+                walk.level as u8
+            );
             TranslateGvaResponse {
                 success: 1,
                 walk_level: walk.level as u8,
@@ -278,9 +321,10 @@ fn translate_gva(process_id: u32, method: u32, cr3: u64, gva: u64) -> TranslateG
         }
         Err(failure) => {
             eprintln!(
-                "translate_gva: walk failed pid={process_id} gva={gva:#x} cr3={cr3:#x} stage={} status={}",
+                "translate_gva: walk failed pid={process_id} gva={gva:#x} cr3={cr3:#x} stage={} ({}) status={:#010x}",
                 failure.stage,
-                failure.status
+                translate_fail_stage(failure.stage),
+                failure.status as u32
             );
             translate_gva_failed(method, cr3, failure.status, failure.stage, &failure)
         }
@@ -294,23 +338,28 @@ fn translate_gva_cr3_switch(
     process_id: u32,
 ) -> TranslateGvaResponse {
     match crate::paging::gva_to_gpa_cr3_switch(cr3, gva) {
-        Ok(gpa) => TranslateGvaResponse {
-            success: 1,
-            walk_level: 0,
-            fail_stage: 0,
-            method: method as u8,
-            status: 0,
-            used_cr3: cr3,
-            pml4e_pa: 0,
-            pdpe_pa: 0,
-            pde_pa: 0,
-            pte_pa: 0,
-            gpa,
-            hpa: crate::paging::gpa_to_hpa(gpa),
-        },
+        Ok(gpa) => {
+            eprintln!(
+                "translate_gva: cr3-switch ok pid={process_id} gva={gva:#x} gpa={gpa:#x}"
+            );
+            TranslateGvaResponse {
+                success: 1,
+                walk_level: 0,
+                fail_stage: 0,
+                method: method as u8,
+                status: 0,
+                used_cr3: cr3,
+                pml4e_pa: 0,
+                pdpe_pa: 0,
+                pde_pa: 0,
+                pte_pa: 0,
+                gpa,
+                hpa: crate::paging::gpa_to_hpa(gpa),
+            }
+        }
         Err(status) => {
             eprintln!(
-                "translate_gva: cr3-switch failed pid={process_id} gva={gva:#x} cr3={cr3:#x} status={status}"
+                "translate_gva: cr3-switch failed pid={process_id} gva={gva:#x} cr3={cr3:#x} status={status:#010x}"
             );
             let failure = crate::paging::cr3_switch_failure(status);
             translate_gva_failed(method, cr3, failure.status, failure.stage, &failure)
@@ -362,7 +411,28 @@ fn handle_ioctl_translate_gva(
             .cast::<TranslateGvaRequest>()
             .read_unaligned()
     };
+    eprintln!(
+        "IOCTL_TRANSLATE_GVA: pid={} method={} cr3={:#x} gva={:#x}",
+        request.process_id,
+        request.method,
+        request.cr3,
+        request.gva
+    );
     let response = translate_gva(request.process_id, request.method, request.cr3, request.gva);
+    if response.success != 0 {
+        eprintln!(
+            "IOCTL_TRANSLATE_GVA ok: gpa={:#x} hpa={:#x}",
+            response.gpa,
+            response.hpa
+        );
+    } else {
+        eprintln!(
+            "IOCTL_TRANSLATE_GVA failed: stage={} ({}) status={:#010x}",
+            response.fail_stage,
+            translate_fail_stage(response.fail_stage),
+            response.status as u32
+        );
+    }
     unsafe {
         system_buffer
             .cast::<TranslateGvaResponse>()
@@ -386,7 +456,14 @@ fn handle_ioctl_read_gva(
 
     let request = unsafe { system_buffer.cast::<ReadGvaRequest>().read_unaligned() };
     let size = request.size as usize;
+    eprintln!(
+        "IOCTL_READ_GVA: pid={} cr3={:#x} gva={:#x} size={size}",
+        request.process_id,
+        request.cr3,
+        request.gva
+    );
     if size == 0 || size > MEM_IO_MAX_LEN {
+        eprintln!("IOCTL_READ_GVA: invalid size={size}");
         return unsafe { complete_request(irp, STATUS_INVALID_PARAMETER, 0) };
     }
     if output_len < size {
@@ -400,12 +477,26 @@ fn handle_ioctl_read_gva(
         request.gva,
     );
     if translation.success == 0 {
+        eprintln!(
+            "IOCTL_READ_GVA: translate failed stage={} ({})",
+            translation.fail_stage,
+            translate_fail_stage(translation.fail_stage)
+        );
         return unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, 0) };
     }
 
     if crate::paging::read_hpa(translation.hpa, system_buffer, size).is_err() {
+        eprintln!(
+            "IOCTL_READ_GVA: read_hpa failed hpa={:#x} size={size}",
+            translation.hpa
+        );
         return unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, 0) };
     }
+
+    eprintln!(
+        "IOCTL_READ_GVA ok: hpa={:#x} size={size}",
+        translation.hpa
+    );
 
     unsafe { complete_request(irp, STATUS_SUCCESS, size) }
 }
@@ -436,9 +527,19 @@ fn handle_ioctl_write_physical(
     }
 
     let data = unsafe { system_buffer.add(size_of::<PhysMemIoRequest>()) };
+    eprintln!(
+        "IOCTL_WRITE_PHYSICAL: hpa={:#x} size={size}",
+        request.address
+    );
     if crate::paging::write_hpa(request.address, data, size).is_err() {
+        eprintln!(
+            "IOCTL_WRITE_PHYSICAL failed: hpa={:#x} size={size}",
+            request.address
+        );
         return unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, 0) };
     }
+
+    eprintln!("IOCTL_WRITE_PHYSICAL ok");
 
     unsafe { complete_request(irp, STATUS_SUCCESS, 0) }
 }
@@ -460,7 +561,33 @@ fn handle_ioctl_ept_hook2(
     }
 
     let request = unsafe { system_buffer.cast::<EptHook2Request>().read_unaligned() };
-    let response = crate::ept_hook::install(request.process_id, request.target_gva, request.hook_gva);
+    eprintln!(
+        "IOCTL_EPT_HOOK2: pid={} syscall={} target={:#x} hook={:#x}",
+        request.process_id,
+        request.syscall_number,
+        request.target_gva,
+        request.hook_gva
+    );
+    let response = crate::ept_hook::install(
+        request.process_id,
+        request.syscall_number,
+        request.target_gva,
+        request.hook_gva,
+    );
+    if response.success != 0 {
+        eprintln!(
+            "IOCTL_EPT_HOOK2 ok: patched_len={} trampoline={:#x} target_gpa={:#x}",
+            response.patched_len,
+            response.trampoline_gva,
+            response.target_gpa
+        );
+    } else {
+        eprintln!(
+            "IOCTL_EPT_HOOK2 failed: err={} ({})",
+            response.error_code,
+            ept_hook_err_name(response.error_code)
+        );
+    }
     unsafe {
         system_buffer
             .cast::<EptHook2Response>()
@@ -486,6 +613,22 @@ fn handle_ioctl_get_ssdt(
     }
 
     let response = crate::ssdt::get_ssdt_info();
+    if response.success != 0 {
+        eprintln!(
+            "IOCTL_GET_SSDT ok: ntos={:#x} ksd={:#x} table={:#x} count={} shadow={:#x}",
+            response.ntoskrnl_base,
+            response.ke_service_descriptor_table,
+            response.service_table_base,
+            response.number_of_services,
+            response.ke_service_descriptor_table_shadow
+        );
+    } else {
+        eprintln!(
+            "IOCTL_GET_SSDT failed: err={} ({})",
+            response.error_code,
+            ssdt_err_name(response.error_code)
+        );
+    }
     unsafe {
         system_buffer
             .cast::<GetSsdtResponse>()
@@ -518,7 +661,23 @@ fn handle_ioctl_get_ssdt_function(
             .cast::<GetSsdtFunctionRequest>()
             .read_unaligned()
     };
+    let name = c_str_preview(&request.name);
+    eprintln!("IOCTL_GET_SSDT_FUNCTION: name={name}");
     let response = crate::ssdt::resolve_ssdt_function(&request.name);
+    if response.success != 0 {
+        eprintln!(
+            "IOCTL_GET_SSDT_FUNCTION ok: export={:#x} fn={:#x} syscall={}",
+            response.export_address,
+            response.function_address,
+            response.syscall_number
+        );
+    } else {
+        eprintln!(
+            "IOCTL_GET_SSDT_FUNCTION failed: err={} ({})",
+            response.error_code,
+            ssdt_err_name(response.error_code)
+        );
+    }
     unsafe {
         system_buffer
             .cast::<GetSsdtFunctionResponse>()
@@ -549,7 +708,20 @@ fn handle_ioctl_ept_unhook(
     }
 
     let request = unsafe { system_buffer.cast::<EptUnhookRequest>().read_unaligned() };
+    eprintln!(
+        "IOCTL_EPT_UNHOOK: pid={} target={:#x}",
+        request.process_id,
+        request.target_gva
+    );
     let error_code = crate::ept_hook::uninstall(request);
+    if error_code != 0 {
+        eprintln!(
+            "IOCTL_EPT_UNHOOK failed: err={error_code} ({})",
+            ept_hook_err_name(error_code)
+        );
+    } else {
+        eprintln!("IOCTL_EPT_UNHOOK ok");
+    }
     unsafe {
         system_buffer.write_unaligned(error_code);
     }
@@ -561,6 +733,7 @@ fn handle_ioctl_ept_unhook(
 }
 
 extern "C" fn driver_unload(driver: *mut DRIVER_OBJECT) {
+    eprintln!("win_hv unload: removing all EPT hooks");
     crate::ept_hook::uninstall_all();
     let mut symlink_buf = [0u16; 96];
     let Some(symlink_used) = encode_utf16z(SYMLINK_NAME, &mut symlink_buf) else {

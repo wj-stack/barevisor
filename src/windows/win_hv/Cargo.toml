@@ -24,7 +24,6 @@ bench = false
 hv = { path = "../../hvcore" }
 kernel_ssdt = { path = "../kernel_ssdt" }
 shared-contract = { path = "../shared-contract" }
-iced-x86 = { version = "1.21.0", default-features = false, features = ["decoder", "no_std"] }
 spin = "0.11.0"
 wdk = "0.4.1"
 wdk-sys = "0.5.1"

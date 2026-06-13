@@ -545,7 +545,7 @@ fn write_physical(h: &HANDLE, address: &str, hex_data: &str) -> anyhow::Result<(
 fn ept_hook2(h: &HANDLE, target: &str, hook: &str, pid: u32) -> anyhow::Result<()> {
     let request = EptHook2Request {
         process_id: pid,
-        _padding: 0,
+        syscall_number: 0,
         target_gva: parse_address(target)?,
         hook_gva: parse_address(hook)?,
     };

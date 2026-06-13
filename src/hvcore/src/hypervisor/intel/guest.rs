@@ -659,17 +659,19 @@ pub(crate) fn vmcs_guest_physical_address() -> u64 {
     vmread(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL)
 }
 
-pub(crate) fn set_monitor_trap_flag(enabled: bool) {
+pub(crate) fn set_monitor_trap_flag(enabled: bool) -> bool {
     let current = vmread(vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS);
     let requested = if enabled {
         current | vmcs::control::PrimaryControls::MONITOR_TRAP_FLAG.bits() as u64
     } else {
         current & !(vmcs::control::PrimaryControls::MONITOR_TRAP_FLAG.bits() as u64)
     };
-    vmwrite(
-        vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS,
-        VmxGuest::adjust_vmx_control(VmxControl::ProcessorBased, requested),
-    );
+    let adjusted =
+        VmxGuest::adjust_vmx_control(VmxControl::ProcessorBased, requested);
+    match unsafe { x86::bits64::vmx::vmwrite(vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS, adjusted) } {
+        Ok(()) => true,
+        Err(_) => false,
+    }
 }
 
 static SHARED_GUEST_DATA: LazyLock<SharedGuestData> = LazyLock::new(|| SharedGuestData {
