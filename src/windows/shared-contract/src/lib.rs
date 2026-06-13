@@ -4,7 +4,7 @@
 #![no_std]
 
 /// Logical contract version (bump when IOCTL shapes change).
-pub const CONTRACT_VERSION: &str = "0.6.0";
+pub const CONTRACT_VERSION: &str = "0.6.1";
 
 /// `FILE_DEVICE_UNKNOWN` for `CTL_CODE`.
 pub const FILE_DEVICE_UNKNOWN: u32 = 0x0000_0022;
@@ -106,6 +106,30 @@ pub const IOCTL_GET_SSDT_FUNCTION: u32 = ctl_code(
     FILE_ANY_ACCESS,
 );
 
+/// Returns `SsdtHookInfoResponse` for the `ssdt_hook` example driver.
+pub const IOCTL_SSDT_HOOK_GET_INFO: u32 = ctl_code(
+    FILE_DEVICE_UNKNOWN,
+    0x910,
+    METHOD_BUFFERED,
+    FILE_ANY_ACCESS,
+);
+
+/// Installs the `ssdt_hook` example EPT detour (calls `IOCTL_EPT_HOOK2` under the hood).
+pub const IOCTL_SSDT_HOOK_INSTALL: u32 = ctl_code(
+    FILE_DEVICE_UNKNOWN,
+    0x911,
+    METHOD_BUFFERED,
+    FILE_ANY_ACCESS,
+);
+
+/// Removes the `ssdt_hook` example EPT detour.
+pub const IOCTL_SSDT_HOOK_UNINSTALL: u32 = ctl_code(
+    FILE_DEVICE_UNKNOWN,
+    0x912,
+    METHOD_BUFFERED,
+    FILE_ANY_ACCESS,
+);
+
 /// Maximum bytes per read/write IOCTL (must match `hv::hypercall::HV_MEM_IO_MAX_LEN`).
 pub const MEM_IO_MAX_LEN: usize = 4096;
 
@@ -117,6 +141,12 @@ pub const DEVICE_BASENAME: &str = "BarevisorHv";
 
 /// User-mode path (UTF-8) — pass to `CreateFileW` after UTF-16 conversion.
 pub const USER_DEVICE_PATH: &str = r"\\.\BarevisorHv";
+
+/// Basename for the `ssdt_hook` example device (`\\.\SsdtHook`).
+pub const SSDT_HOOK_DEVICE_BASENAME: &str = "SsdtHook";
+
+/// User-mode path for [`SSDT_HOOK_DEVICE_BASENAME`].
+pub const SSDT_HOOK_USER_DEVICE_PATH: &str = r"\\.\SsdtHook";
 
 /// Input header for [`IOCTL_READ_MEMORY`] and [`IOCTL_WRITE_MEMORY`].
 #[repr(C)]
@@ -370,6 +400,29 @@ pub struct GetSsdtFunctionResponse {
     pub function_address: u64,
     /// Ground-truth address from `MmGetSystemRoutineAddress`.
     pub export_address: u64,
+}
+
+/// Fixed export name length in [`SsdtHookInfoResponse::export_name`].
+pub const SSDT_HOOK_EXPORT_NAME_LEN: usize = 16;
+
+/// Output for [`IOCTL_SSDT_HOOK_GET_INFO`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SsdtHookInfoResponse {
+    /// `1` when `target_gva` / `hook_gva` are valid.
+    pub ready: u8,
+    /// `1` when an EPT hook is currently installed.
+    pub installed: u8,
+    /// Reserved; must be zero.
+    pub _padding: [u8; 6],
+    /// Kernel VA of the SSDT target (e.g. `NtOpenProcess`).
+    pub target_gva: u64,
+    /// Kernel VA of the detour handler in `ssdt_hook.sys`.
+    pub hook_gva: u64,
+    /// NUL-terminated ASCII export name (e.g. `NtOpenProcess`).
+    pub export_name: [u8; SSDT_HOOK_EXPORT_NAME_LEN],
+    /// Trampoline VA after install (`0` before install).
+    pub trampoline_gva: u64,
 }
 
 /// Input for [`IOCTL_READ_GVA`].

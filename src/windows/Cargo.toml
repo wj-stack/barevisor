@@ -2,6 +2,7 @@
 members = [
     "check_hv_vendor",
     "hook_example",
+    "kernel_ssdt",
     "shared-contract",
     "ssdt_hook",
     "win_hv",

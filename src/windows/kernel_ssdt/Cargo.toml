@@ -1,0 +1,15 @@
+[package]
+name = "kernel_ssdt"
+description = "Shared ntoskrnl SSDT resolution for Windows kernel drivers"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+wdk-sys = "0.5.1"

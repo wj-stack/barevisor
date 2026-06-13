@@ -3,6 +3,9 @@
 //! Example:
 //! ```text
 //! hook_example
+//! # load ssdt_hook.sys + win_hv.sys, then:
+//! win_hv_client ssdt-hook info
+//! win_hv_client ssdt-hook install
 //! # note addresses printed at startup, then:
 //! 1
 //! 2
@@ -57,6 +60,7 @@ fn main() {
     println!("  C (function_c) = {addr_c:#018x}");
     println!();
     println!("Enter 1/2/3 to call A/B/C, o to OpenProcess (SSDT hook test), or q to quit.");
+    println!("(run `win_hv_client ssdt-hook install` before testing OpenProcess hook)");
 
     let stdin = io::stdin();
     loop {

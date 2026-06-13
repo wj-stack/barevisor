@@ -10,12 +10,14 @@ use shared_contract::{
     EptHook2Request, EptHook2Response, EptUnhookRequest, GetCr3ByPidRequest, GetCr3ByPidResponse,
     GetSsdtFunctionRequest, GetSsdtFunctionResponse, GetSsdtResponse, IOCTL_EPT_HOOK2,
     IOCTL_EPT_UNHOOK, IOCTL_GET_CR3_BY_PID, IOCTL_GET_SSDT, IOCTL_GET_SSDT_FUNCTION, IOCTL_PING,
-    IOCTL_READ_GVA, IOCTL_READ_MEMORY, IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY, IOCTL_WRITE_PHYSICAL,
+    IOCTL_READ_GVA, IOCTL_READ_MEMORY, IOCTL_SSDT_HOOK_GET_INFO, IOCTL_SSDT_HOOK_INSTALL,
+    IOCTL_SSDT_HOOK_UNINSTALL, IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY, IOCTL_WRITE_PHYSICAL,
     MEM_IO_MAX_LEN, MemIoRequest, PhysMemIoRequest, PING_RESPONSE_U32, ReadGvaRequest,
     SSDT_ERR_EXPORT, SSDT_ERR_NAME, SSDT_ERR_NO_MATCH, SSDT_ERR_NOT_FOUND, SSDT_FUNCTION_NAME_MAX,
-    TranslateGvaRequest, TranslateGvaResponse, TRANSLATE_FAIL_CR3, TRANSLATE_FAIL_INVALID,
-    TRANSLATE_FAIL_MMGPA, TRANSLATE_FAIL_PD, TRANSLATE_FAIL_PML4, TRANSLATE_FAIL_PDPT,
-    TRANSLATE_FAIL_PTE, TRANSLATE_METHOD_CR3_SWITCH, TRANSLATE_METHOD_PAGE_WALK, USER_DEVICE_PATH,
+    SSDT_HOOK_USER_DEVICE_PATH, SsdtHookInfoResponse, TranslateGvaRequest, TranslateGvaResponse,
+    TRANSLATE_FAIL_CR3, TRANSLATE_FAIL_INVALID, TRANSLATE_FAIL_MMGPA, TRANSLATE_FAIL_PD,
+    TRANSLATE_FAIL_PML4, TRANSLATE_FAIL_PDPT, TRANSLATE_FAIL_PTE, TRANSLATE_METHOD_CR3_SWITCH,
+    TRANSLATE_METHOD_PAGE_WALK, USER_DEVICE_PATH,
 };
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::Storage::FileSystem::{
@@ -138,6 +140,21 @@ enum Commands {
         /// Export name (e.g. `NtOpenProcess`).
         name: String,
     },
+    /// Control the `ssdt_hook` example driver (`\\.\SsdtHook`).
+    SsdtHook {
+        #[command(subcommand)]
+        action: SsdtHookAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SsdtHookAction {
+    /// Show SSDT target and kernel hook handler addresses.
+    Info,
+    /// Install the EPT hook (requires `win_hv` loaded).
+    Install,
+    /// Remove the EPT hook.
+    Uninstall,
 }
 
 fn parse_translate_method(input: &str) -> Result<u32, String> {
@@ -158,37 +175,58 @@ fn parse_address(input: &str) -> anyhow::Result<u64> {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let device = cli.device.as_deref().unwrap_or(USER_DEVICE_PATH);
-
     println!("contract version: {}", shared_contract::CONTRACT_VERSION);
-    println!("opening: {device}");
 
-    let handle = open_device(device)?;
-    let result = match cli.command {
-        Commands::Ping => ping(&handle),
-        Commands::Read { address, size } => read_memory(&handle, &address, size),
+    match cli.command {
+        Commands::SsdtHook { action } => {
+            println!("opening: {SSDT_HOOK_USER_DEVICE_PATH}");
+            let handle = open_device(SSDT_HOOK_USER_DEVICE_PATH)?;
+            let result = match action {
+                SsdtHookAction::Info => ssdt_hook_info(&handle),
+                SsdtHookAction::Install => ssdt_hook_install(&handle),
+                SsdtHookAction::Uninstall => ssdt_hook_uninstall(&handle),
+            };
+            unsafe {
+                CloseHandle(handle)?;
+            }
+            result
+        }
+        command => {
+            let device = cli.device.as_deref().unwrap_or(USER_DEVICE_PATH);
+            println!("opening: {device}");
+            let handle = open_device(device)?;
+            let result = dispatch_win_hv(&handle, command);
+            unsafe {
+                CloseHandle(handle)?;
+            }
+            result
+        }
+    }
+}
+
+fn dispatch_win_hv(h: &HANDLE, command: Commands) -> anyhow::Result<()> {
+    match command {
+        Commands::Ping => ping(h),
+        Commands::Read { address, size } => read_memory(h, &address, size),
         Commands::Translate {
             pid,
             cr3,
             address,
             method,
-        } => translate_gva_cmd(&handle, pid, cr3.as_deref(), &address, method),
+        } => translate_gva_cmd(h, pid, cr3.as_deref(), &address, method),
         Commands::ReadGva { pid, cr3, address, size } => {
-            read_gva(&handle, pid, cr3.as_deref(), &address, size)
+            read_gva(h, pid, cr3.as_deref(), &address, size)
         }
-        Commands::Write { address, hex } => write_memory(&handle, &address, &hex),
-        Commands::WritePhys { address, hex } => write_physical(&handle, &address, &hex),
-        Commands::Cr3 { pid } => get_cr3(&handle, pid),
-        Commands::ListCr3 => list_cr3(&handle),
-        Commands::Hook { target, hook, pid } => ept_hook2(&handle, &target, &hook, pid),
-        Commands::Unhook { target, pid } => ept_unhook(&handle, &target, pid),
-        Commands::Ssdt => get_ssdt(&handle),
-        Commands::SsdtFn { name } => get_ssdt_function(&handle, &name),
-    };
-    unsafe {
-        CloseHandle(handle)?;
+        Commands::Write { address, hex } => write_memory(h, &address, &hex),
+        Commands::WritePhys { address, hex } => write_physical(h, &address, &hex),
+        Commands::Cr3 { pid } => get_cr3(h, pid),
+        Commands::ListCr3 => list_cr3(h),
+        Commands::Hook { target, hook, pid } => ept_hook2(h, &target, &hook, pid),
+        Commands::Unhook { target, pid } => ept_unhook(h, &target, pid),
+        Commands::Ssdt => get_ssdt(h),
+        Commands::SsdtFn { name } => get_ssdt_function(h, &name),
+        Commands::SsdtHook { .. } => unreachable!(),
     }
-    result
 }
 
 fn ping(h: &HANDLE) -> anyhow::Result<()> {
@@ -559,6 +597,112 @@ fn ept_unhook(h: &HANDLE, target: &str, pid: u32) -> anyhow::Result<()> {
         bail!("EPT unhook failed: error_code={error_code}");
     }
     println!("unhook ok: target={target}");
+    Ok(())
+}
+
+fn ssdt_hook_export_name(response: &SsdtHookInfoResponse) -> String {
+    let end = response
+        .export_name
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(response.export_name.len());
+    String::from_utf8_lossy(&response.export_name[..end]).into_owned()
+}
+
+fn ssdt_hook_info(h: &HANDLE) -> anyhow::Result<()> {
+    let response = ssdt_hook_query_info(h)?;
+    if response.ready == 0 {
+        bail!("ssdt_hook driver not ready (target not resolved)");
+    }
+    let name = ssdt_hook_export_name(&response);
+    println!("export:           {name}");
+    println!("target_gva:       {:#x}", response.target_gva);
+    println!("hook_gva:         {:#x}", response.hook_gva);
+    println!("installed:        {}", response.installed);
+    if response.trampoline_gva != 0 {
+        println!("trampoline_gva:   {:#x}", response.trampoline_gva);
+    }
+    println!();
+    println!("install: win_hv_client ssdt-hook install");
+    println!(
+        "manual:  win_hv_client hook --target {:#x} --hook {:#x}",
+        response.target_gva, response.hook_gva
+    );
+    Ok(())
+}
+
+fn ssdt_hook_query_info(h: &HANDLE) -> anyhow::Result<SsdtHookInfoResponse> {
+    let mut response = SsdtHookInfoResponse::default();
+    let mut returned = 0u32;
+    unsafe {
+        DeviceIoControl(
+            *h,
+            IOCTL_SSDT_HOOK_GET_INFO,
+            None,
+            0,
+            Some(std::ptr::from_mut(&mut response).cast::<c_void>()),
+            size_of::<SsdtHookInfoResponse>() as u32,
+            Some(std::ptr::from_mut(&mut returned)),
+            None,
+        )?;
+    }
+    if returned as usize != size_of::<SsdtHookInfoResponse>() {
+        bail!("IOCTL_SSDT_HOOK_GET_INFO returned {returned} bytes");
+    }
+    Ok(response)
+}
+
+fn ssdt_hook_install(h: &HANDLE) -> anyhow::Result<()> {
+    let info = ssdt_hook_query_info(h)?;
+    if info.ready == 0 {
+        bail!("ssdt_hook driver not ready");
+    }
+    if info.installed != 0 {
+        bail!("hook already installed (trampoline={:#x})", info.trampoline_gva);
+    }
+
+    let mut response = EptHook2Response::default();
+    let mut returned = 0u32;
+    unsafe {
+        DeviceIoControl(
+            *h,
+            IOCTL_SSDT_HOOK_INSTALL,
+            None,
+            0,
+            Some(std::ptr::from_mut(&mut response).cast::<c_void>()),
+            size_of::<EptHook2Response>() as u32,
+            Some(std::ptr::from_mut(&mut returned)),
+            None,
+        )?;
+    }
+    if returned as usize != size_of::<EptHook2Response>() {
+        bail!("IOCTL_SSDT_HOOK_INSTALL returned {returned} bytes");
+    }
+    if response.success == 0 {
+        bail!("ssdt-hook install failed: error_code={}", response.error_code);
+    }
+    println!(
+        "hook ok: target={:#x} hook={:#x} trampoline={:#x} patched_len={}",
+        info.target_gva, info.hook_gva, response.trampoline_gva, response.patched_len
+    );
+    Ok(())
+}
+
+fn ssdt_hook_uninstall(h: &HANDLE) -> anyhow::Result<()> {
+    let mut returned = 0u32;
+    unsafe {
+        DeviceIoControl(
+            *h,
+            IOCTL_SSDT_HOOK_UNINSTALL,
+            None,
+            0,
+            None,
+            0,
+            Some(std::ptr::from_mut(&mut returned)),
+            None,
+        )?;
+    }
+    println!("ssdt-hook removed");
     Ok(())
 }
 
