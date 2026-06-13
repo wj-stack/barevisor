@@ -3,7 +3,7 @@
 use core::ffi::c_void;
 use core::mem::size_of;
 use core::ptr::null_mut;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use shared_contract::{
     EptHook2Request, EptHook2Response, EptUnhookRequest, SsdtHookInfoResponse,
@@ -14,8 +14,8 @@ use shared_contract::{
 };
 use spin::Mutex;
 use wdk_sys::{
-    HANDLE, IO_STATUS_BLOCK, NTSTATUS, NT_SUCCESS, OBJECT_ATTRIBUTES, STATUS_INSUFFICIENT_RESOURCES,
-    STATUS_NOT_FOUND, STATUS_UNSUCCESSFUL, UNICODE_STRING,
+    HANDLE, IO_STATUS_BLOCK, NTSTATUS, NT_SUCCESS, OBJECT_ATTRIBUTES, STATUS_ACCESS_DENIED,
+    STATUS_INSUFFICIENT_RESOURCES, STATUS_NOT_FOUND, STATUS_UNSUCCESSFUL, UNICODE_STRING,
 };
 
 use crate::{ClientId, NtOpenProcessFn};
@@ -37,6 +37,7 @@ static HOOK_STATE: Mutex<HookState> = Mutex::new(HookState {
 });
 static TRAMPOLINE_GVA: AtomicU64 = AtomicU64::new(0);
 static TARGET_GPA: AtomicU64 = AtomicU64::new(0);
+static BLOCK_PID: AtomicU32 = AtomicU32::new(0);
 
 pub(crate) fn init_target() -> Result<(), NTSTATUS> {
     let resolved = kernel_ssdt::resolve_ssdt_function(HOOK_EXPORT)?;
@@ -64,7 +65,13 @@ pub(crate) fn info_response() -> SsdtHookInfoResponse {
         hook_gva: state.hook_gva,
         export_name,
         trampoline_gva: TRAMPOLINE_GVA.load(Ordering::Acquire),
+        block_pid: BLOCK_PID.load(Ordering::Acquire),
+        _padding2: 0,
     }
+}
+
+pub(crate) fn set_block_pid(pid: u32) {
+    BLOCK_PID.store(pid, Ordering::Release);
 }
 
 pub(crate) fn install_hook() -> Result<EptHook2Response, NTSTATUS> {
@@ -113,14 +120,37 @@ pub(crate) fn on_hook_hit(
     if trampoline == 0 {
         return STATUS_UNSUCCESSFUL;
     }
+
+    let block_pid = BLOCK_PID.load(Ordering::Acquire);
+    if block_pid != 0 {
+        if let Some(target_pid) = client_id_target_pid(client_id) {
+            if target_pid == block_pid {
+                restore_hook_view();
+                return STATUS_ACCESS_DENIED;
+            }
+        }
+    }
+
     let original: NtOpenProcessFn = unsafe { core::mem::transmute(trampoline) };
     let status =
         unsafe { original(process_handle, desired_access, object_attributes, client_id) };
+    restore_hook_view();
+    status
+}
+
+fn client_id_target_pid(client_id: *mut ClientId) -> Option<u32> {
+    if client_id.is_null() {
+        return None;
+    }
+    let unique_process = unsafe { (*client_id).unique_process };
+    Some(unique_process as usize as u32)
+}
+
+fn restore_hook_view() {
     let target_gpa = TARGET_GPA.load(Ordering::Acquire);
     if target_gpa != 0 {
         let _ = hv::hypercall::restore_ept_hook2(target_gpa);
     }
-    status
 }
 
 unsafe extern "system" {

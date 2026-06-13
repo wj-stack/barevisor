@@ -3,8 +3,9 @@
 use core::mem::size_of;
 
 use shared_contract::{
-    EptHook2Response, IOCTL_SSDT_HOOK_GET_INFO, IOCTL_SSDT_HOOK_INSTALL, IOCTL_SSDT_HOOK_UNINSTALL,
-    SsdtHookInfoResponse,
+    EptHook2Response, IOCTL_SSDT_HOOK_GET_INFO, IOCTL_SSDT_HOOK_INSTALL,
+    IOCTL_SSDT_HOOK_SET_BLOCK_PID, IOCTL_SSDT_HOOK_UNINSTALL, SsdtHookInfoResponse,
+    SsdtHookSetBlockPidRequest,
 };
 use wdk_sys::{
     CCHAR, DEVICE_OBJECT, DRIVER_OBJECT, IO_NO_INCREMENT, IRP, NTSTATUS,
@@ -78,6 +79,7 @@ unsafe extern "C" fn dispatch_device_control(
 
     let device_io_control = unsafe { (*stack_location).Parameters.DeviceIoControl };
     let ioctl_code = device_io_control.IoControlCode;
+    let input_len = device_io_control.InputBufferLength as usize;
     let output_len = device_io_control.OutputBufferLength as usize;
     let system_buffer = unsafe { (*irp).AssociatedIrp.SystemBuffer.cast::<u8>() };
 
@@ -85,6 +87,9 @@ unsafe extern "C" fn dispatch_device_control(
         IOCTL_SSDT_HOOK_GET_INFO => handle_ioctl_get_info(irp, output_len, system_buffer),
         IOCTL_SSDT_HOOK_INSTALL => handle_ioctl_install(irp, output_len, system_buffer),
         IOCTL_SSDT_HOOK_UNINSTALL => handle_ioctl_uninstall(irp),
+        IOCTL_SSDT_HOOK_SET_BLOCK_PID => {
+            handle_ioctl_set_block_pid(irp, input_len, system_buffer)
+        }
         _ => unsafe { complete_request(irp, STATUS_INVALID_DEVICE_REQUEST, 0) },
     }
 }
@@ -159,6 +164,27 @@ fn handle_ioctl_uninstall(irp: *mut IRP) -> NTSTATUS {
             unsafe { complete_request(irp, status, 0) }
         }
     }
+}
+
+fn handle_ioctl_set_block_pid(
+    irp: *mut IRP,
+    input_len: usize,
+    system_buffer: *mut u8,
+) -> NTSTATUS {
+    if input_len < size_of::<SsdtHookSetBlockPidRequest>() {
+        return unsafe { complete_request(irp, STATUS_BUFFER_TOO_SMALL, 0) };
+    }
+    if system_buffer.is_null() {
+        return unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, 0) };
+    }
+
+    let request = unsafe {
+        system_buffer
+            .cast::<SsdtHookSetBlockPidRequest>()
+            .read_unaligned()
+    };
+    crate::hook_state::set_block_pid(request.pid);
+    unsafe { complete_request(irp, STATUS_SUCCESS, 0) }
 }
 
 pub(crate) fn create_device(driver: &mut DRIVER_OBJECT) -> NTSTATUS {

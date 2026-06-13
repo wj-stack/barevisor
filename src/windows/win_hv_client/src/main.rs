@@ -11,10 +11,11 @@ use shared_contract::{
     GetSsdtFunctionRequest, GetSsdtFunctionResponse, GetSsdtResponse, IOCTL_EPT_HOOK2,
     IOCTL_EPT_UNHOOK, IOCTL_GET_CR3_BY_PID, IOCTL_GET_SSDT, IOCTL_GET_SSDT_FUNCTION, IOCTL_PING,
     IOCTL_READ_GVA, IOCTL_READ_MEMORY, IOCTL_SSDT_HOOK_GET_INFO, IOCTL_SSDT_HOOK_INSTALL,
-    IOCTL_SSDT_HOOK_UNINSTALL, IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY, IOCTL_WRITE_PHYSICAL,
-    MEM_IO_MAX_LEN, MemIoRequest, PhysMemIoRequest, PING_RESPONSE_U32, ReadGvaRequest,
-    SSDT_ERR_EXPORT, SSDT_ERR_NAME, SSDT_ERR_NO_MATCH, SSDT_ERR_NOT_FOUND, SSDT_FUNCTION_NAME_MAX,
-    SSDT_HOOK_USER_DEVICE_PATH, SsdtHookInfoResponse, TranslateGvaRequest, TranslateGvaResponse,
+    IOCTL_SSDT_HOOK_SET_BLOCK_PID, IOCTL_SSDT_HOOK_UNINSTALL, IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY,
+    IOCTL_WRITE_PHYSICAL, MEM_IO_MAX_LEN, MemIoRequest, PhysMemIoRequest, PING_RESPONSE_U32,
+    ReadGvaRequest, SSDT_ERR_EXPORT, SSDT_ERR_NAME, SSDT_ERR_NO_MATCH, SSDT_ERR_NOT_FOUND,
+    SSDT_FUNCTION_NAME_MAX, SSDT_HOOK_USER_DEVICE_PATH, SsdtHookInfoResponse,
+    SsdtHookSetBlockPidRequest, TranslateGvaRequest, TranslateGvaResponse,
     TRANSLATE_FAIL_CR3, TRANSLATE_FAIL_INVALID, TRANSLATE_FAIL_MMGPA, TRANSLATE_FAIL_PD,
     TRANSLATE_FAIL_PML4, TRANSLATE_FAIL_PDPT, TRANSLATE_FAIL_PTE, TRANSLATE_METHOD_CR3_SWITCH,
     TRANSLATE_METHOD_PAGE_WALK, USER_DEVICE_PATH,
@@ -155,6 +156,11 @@ enum SsdtHookAction {
     Install,
     /// Remove the EPT hook.
     Uninstall,
+    /// Deny `NtOpenProcess` when `ClientId` matches this PID (`0` clears the filter).
+    BlockPid {
+        /// Target process ID (`0` disables blocking).
+        pid: u32,
+    },
 }
 
 fn parse_translate_method(input: &str) -> Result<u32, String> {
@@ -185,6 +191,7 @@ fn main() -> anyhow::Result<()> {
                 SsdtHookAction::Info => ssdt_hook_info(&handle),
                 SsdtHookAction::Install => ssdt_hook_install(&handle),
                 SsdtHookAction::Uninstall => ssdt_hook_uninstall(&handle),
+                SsdtHookAction::BlockPid { pid } => ssdt_hook_set_block_pid(&handle, pid),
             };
             unsafe {
                 CloseHandle(handle)?;
@@ -622,8 +629,12 @@ fn ssdt_hook_info(h: &HANDLE) -> anyhow::Result<()> {
     if response.trampoline_gva != 0 {
         println!("trampoline_gva:   {:#x}", response.trampoline_gva);
     }
+    if response.block_pid != 0 {
+        println!("block_pid:        {}", response.block_pid);
+    }
     println!();
-    println!("install: win_hv_client ssdt-hook install");
+    println!("install:   win_hv_client ssdt-hook install");
+    println!("block-pid: win_hv_client ssdt-hook block-pid <pid>");
     println!(
         "manual:  win_hv_client hook --target {:#x} --hook {:#x}",
         response.target_gva, response.hook_gva
@@ -703,6 +714,32 @@ fn ssdt_hook_uninstall(h: &HANDLE) -> anyhow::Result<()> {
         )?;
     }
     println!("ssdt-hook removed");
+    Ok(())
+}
+
+fn ssdt_hook_set_block_pid(h: &HANDLE, pid: u32) -> anyhow::Result<()> {
+    let request = SsdtHookSetBlockPidRequest {
+        pid,
+        _padding: 0,
+    };
+    let mut returned = 0u32;
+    unsafe {
+        DeviceIoControl(
+            *h,
+            IOCTL_SSDT_HOOK_SET_BLOCK_PID,
+            Some(std::ptr::from_ref(&request).cast::<c_void>()),
+            size_of::<SsdtHookSetBlockPidRequest>() as u32,
+            None,
+            0,
+            Some(std::ptr::from_mut(&mut returned)),
+            None,
+        )?;
+    }
+    if pid == 0 {
+        println!("ssdt-hook block-pid cleared");
+    } else {
+        println!("ssdt-hook block-pid set to {pid} (matching NtOpenProcess will be denied)");
+    }
     Ok(())
 }
 

@@ -130,6 +130,14 @@ pub const IOCTL_SSDT_HOOK_UNINSTALL: u32 = ctl_code(
     FILE_ANY_ACCESS,
 );
 
+/// Sets the PID filter for `NtOpenProcess` denial (`SsdtHookSetBlockPidRequest`).
+pub const IOCTL_SSDT_HOOK_SET_BLOCK_PID: u32 = ctl_code(
+    FILE_DEVICE_UNKNOWN,
+    0x913,
+    METHOD_BUFFERED,
+    FILE_ANY_ACCESS,
+);
+
 /// Maximum bytes per read/write IOCTL (must match `hv::hypercall::HV_MEM_IO_MAX_LEN`).
 pub const MEM_IO_MAX_LEN: usize = 4096;
 
@@ -423,6 +431,20 @@ pub struct SsdtHookInfoResponse {
     pub export_name: [u8; SSDT_HOOK_EXPORT_NAME_LEN],
     /// Trampoline VA after install (`0` before install).
     pub trampoline_gva: u64,
+    /// When non-zero, `NtOpenProcess` targeting this PID is denied.
+    pub block_pid: u32,
+    /// Reserved; must be zero.
+    pub _padding2: u32,
+}
+
+/// Input for [`IOCTL_SSDT_HOOK_SET_BLOCK_PID`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SsdtHookSetBlockPidRequest {
+    /// Target PID to block (`0` clears the filter).
+    pub pid: u32,
+    /// Reserved; must be zero.
+    pub _padding: u32,
 }
 
 /// Input for [`IOCTL_READ_GVA`].
