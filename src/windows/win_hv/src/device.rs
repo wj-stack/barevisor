@@ -18,7 +18,7 @@ use wdk_sys::{
 };
 
 use crate::eprintln;
-use crate::hook_log::{ept_hook_err_name, ioctl_name, ssdt_err_name, translate_fail_stage};
+use crate::hook_log::{ept_hook_err_name, ssdt_err_name, translate_fail_stage};
 
 const IRP_MJ_CREATE_INDEX: usize = 0x00;
 const IRP_MJ_CLOSE_INDEX: usize = 0x02;
@@ -94,14 +94,6 @@ unsafe extern "C" fn dispatch_device_control(
     let input_len = device_io_control.InputBufferLength as usize;
     let output_len = device_io_control.OutputBufferLength as usize;
     let system_buffer = unsafe { (*irp).AssociatedIrp.SystemBuffer.cast::<u8>() };
-
-    eprintln!(
-        "IOCTL {} ({:#x}) in={} out={}",
-        ioctl_name(ioctl_code),
-        ioctl_code,
-        input_len,
-        output_len
-    );
 
     match ioctl_code {
         IOCTL_PING => handle_ioctl_ping(irp, output_len, system_buffer),
@@ -561,27 +553,13 @@ fn handle_ioctl_ept_hook2(
     }
 
     let request = unsafe { system_buffer.cast::<EptHook2Request>().read_unaligned() };
-    eprintln!(
-        "IOCTL_EPT_HOOK2: pid={} syscall={} target={:#x} hook={:#x}",
-        request.process_id,
-        request.syscall_number,
-        request.target_gva,
-        request.hook_gva
-    );
     let response = crate::ept_hook::install(
         request.process_id,
         request.syscall_number,
         request.target_gva,
         request.hook_gva,
     );
-    if response.success != 0 {
-        eprintln!(
-            "IOCTL_EPT_HOOK2 ok: patched_len={} trampoline={:#x} target_gpa={:#x}",
-            response.patched_len,
-            response.trampoline_gva,
-            response.target_gpa
-        );
-    } else {
+    if response.success == 0 {
         eprintln!(
             "IOCTL_EPT_HOOK2 failed: err={} ({})",
             response.error_code,
@@ -708,19 +686,12 @@ fn handle_ioctl_ept_unhook(
     }
 
     let request = unsafe { system_buffer.cast::<EptUnhookRequest>().read_unaligned() };
-    eprintln!(
-        "IOCTL_EPT_UNHOOK: pid={} target={:#x}",
-        request.process_id,
-        request.target_gva
-    );
     let error_code = crate::ept_hook::uninstall(request);
     if error_code != 0 {
         eprintln!(
             "IOCTL_EPT_UNHOOK failed: err={error_code} ({})",
             ept_hook_err_name(error_code)
         );
-    } else {
-        eprintln!("IOCTL_EPT_UNHOOK ok");
     }
     unsafe {
         system_buffer.write_unaligned(error_code);

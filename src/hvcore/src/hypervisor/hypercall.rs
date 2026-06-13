@@ -19,6 +19,9 @@ pub const HV_HYPERCALL_INSTALL_EPT_HOOK2: u64 = 3;
 /// Removes an EPT Hook2 mapping (RCX=GPA page base).
 pub const HV_HYPERCALL_UNINSTALL_EPT_HOOK2: u64 = 4;
 
+/// Restores the default installed hook view after a hooked syscall returns (RCX=GPA page base).
+pub const HV_HYPERCALL_RESTORE_EPT_HOOK2: u64 = 5;
+
 /// Returned in RAX when a hypercall succeeds.
 pub const HV_HYPERCALL_SUCCESS: u64 = 0;
 
@@ -137,5 +140,12 @@ pub fn install_ept_hook2(gpa_page_base: u64, fake_page_hpa: u64) -> bool {
 #[inline]
 pub fn uninstall_ept_hook2(gpa_page_base: u64) -> bool {
     let (status, _, _, _) = issue(HV_HYPERCALL_UNINSTALL_EPT_HOOK2, gpa_page_base, 0, 0, 0);
+    status == HV_HYPERCALL_SUCCESS
+}
+
+/// Restores the default installed hook view (original PFN, execute blocked).
+#[inline]
+pub fn restore_ept_hook2(gpa_page_base: u64) -> bool {
+    let (status, _, _, _) = issue(HV_HYPERCALL_RESTORE_EPT_HOOK2, gpa_page_base, 0, 0, 0);
     status == HV_HYPERCALL_SUCCESS
 }

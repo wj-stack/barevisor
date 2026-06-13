@@ -82,18 +82,9 @@ unsafe extern "C" fn dispatch_device_control(
     let system_buffer = unsafe { (*irp).AssociatedIrp.SystemBuffer.cast::<u8>() };
 
     match ioctl_code {
-        IOCTL_SSDT_HOOK_GET_INFO => {
-            crate::eprintln!("IOCTL_SSDT_HOOK_GET_INFO");
-            handle_ioctl_get_info(irp, output_len, system_buffer)
-        }
-        IOCTL_SSDT_HOOK_INSTALL => {
-            crate::eprintln!("IOCTL_SSDT_HOOK_INSTALL");
-            handle_ioctl_install(irp, output_len, system_buffer)
-        }
-        IOCTL_SSDT_HOOK_UNINSTALL => {
-            crate::eprintln!("IOCTL_SSDT_HOOK_UNINSTALL");
-            handle_ioctl_uninstall(irp)
-        }
+        IOCTL_SSDT_HOOK_GET_INFO => handle_ioctl_get_info(irp, output_len, system_buffer),
+        IOCTL_SSDT_HOOK_INSTALL => handle_ioctl_install(irp, output_len, system_buffer),
+        IOCTL_SSDT_HOOK_UNINSTALL => handle_ioctl_uninstall(irp),
         _ => unsafe { complete_request(irp, STATUS_INVALID_DEVICE_REQUEST, 0) },
     }
 }
@@ -111,14 +102,6 @@ fn handle_ioctl_get_info(
     }
 
     let response = crate::hook_state::info_response();
-    crate::eprintln!(
-        "SSDT_HOOK_GET_INFO: ready={} installed={} target={:#x} hook={:#x} trampoline={:#x}",
-        response.ready,
-        response.installed,
-        response.target_gva,
-        response.hook_gva,
-        response.trampoline_gva
-    );
     unsafe {
         system_buffer
             .cast::<SsdtHookInfoResponse>()
@@ -140,14 +123,7 @@ fn handle_ioctl_install(
     }
 
     let response = match crate::hook_state::install_hook() {
-        Ok(response) => {
-            crate::eprintln!(
-                "IOCTL_SSDT_HOOK_INSTALL ok: patched_len={} trampoline={:#x}",
-                response.patched_len,
-                response.trampoline_gva
-            );
-            response
-        }
+        Ok(response) => response,
         Err(status) => {
             crate::eprintln!("IOCTL_SSDT_HOOK_INSTALL failed: status={status:#010x}");
             let failed = EptHook2Response {
@@ -177,10 +153,7 @@ fn handle_ioctl_install(
 
 fn handle_ioctl_uninstall(irp: *mut IRP) -> NTSTATUS {
     match crate::hook_state::uninstall_hook() {
-        Ok(()) => {
-            crate::eprintln!("IOCTL_SSDT_HOOK_UNINSTALL ok");
-            unsafe { complete_request(irp, STATUS_SUCCESS, 0) }
-        }
+        Ok(()) => unsafe { complete_request(irp, STATUS_SUCCESS, 0) },
         Err(status) => {
             crate::eprintln!("IOCTL_SSDT_HOOK_UNINSTALL failed: status={status:#010x}");
             unsafe { complete_request(irp, status, 0) }

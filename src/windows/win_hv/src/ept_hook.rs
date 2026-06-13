@@ -14,7 +14,7 @@ use wdk_sys::{
     ntddk::{ExAllocatePool2, ExFreePoolWithTag},
 };
 
-use crate::hook_log::{ept_hook_err_name, log_hex};
+use crate::hook_log::ept_hook_err_name;
 use crate::ops::WindowsOps;
 use crate::paging::{cr3_switch_failure, gpa_to_hpa, gva_to_gpa_cr3_switch, read_hpa};
 
@@ -38,10 +38,6 @@ pub(crate) fn install(
     target_gva: u64,
     hook_gva: u64,
 ) -> EptHook2Response {
-    crate::eprintln!(
-        "ept_hook install begin: pid={process_id} syscall={syscall_number} target={target_gva:#x} hook={hook_gva:#x}"
-    );
-
     if target_gva == 0 || hook_gva == 0 {
         return fail_logged(EPT_HOOK2_ERR_INVALID, "bad_target_or_hook");
     }
@@ -53,11 +49,8 @@ pub(crate) fn install(
     } else {
         crate::process::read_cr3()
     };
-    crate::eprintln!("ept_hook: cr3={cr3:#x}");
-
     let page_gva = target_gva & !(PAGE_SIZE as u64 - 1);
     let page_offset = (target_gva & (PAGE_SIZE as u64 - 1)) as usize;
-    crate::eprintln!("ept_hook: page_gva={page_gva:#x} page_offset={page_offset:#x}");
     if page_offset + HOOK_JUMP_LEN > PAGE_SIZE {
         return fail_logged(EPT_HOOK2_ERR_PAGE_BOUNDARY, "hook_jump_oob");
     }
@@ -66,7 +59,6 @@ pub(crate) fn install(
         Ok(gpa) => gpa & !(PAGE_SIZE as u64 - 1),
         Err(status) => {
             let _ = cr3_switch_failure(status);
-            crate::eprintln!("ept_hook: gva->gpa failed status={status}");
             return fail_logged(EPT_HOOK2_ERR_TRANSLATE, "gva_to_gpa");
         }
     };
@@ -75,31 +67,20 @@ pub(crate) fn install(
     }
 
     let hpa = gpa_to_hpa(gpa_page_base);
-    crate::eprintln!("ept_hook: gpa_page={gpa_page_base:#x} hpa={hpa:#x}");
 
     let mut page = [0u8; PAGE_SIZE];
     if read_hpa(hpa, page.as_mut_ptr(), PAGE_SIZE).is_err() {
         return fail_logged(EPT_HOOK2_ERR_TRANSLATE, "read_hpa");
     }
 
-    let prologue_end = core::cmp::min(page.len(), page_offset + 64);
-    log_hex("ept_hook target", &page[page_offset..prologue_end], 64);
-
     let hook_plan = match plan_hook(&page, page_offset, syscall_number) {
         Some(plan) => plan,
-        None => {
-            crate::eprintln!(
-                "ept_hook: plan_hook failed (pass syscall_number for instrumented Nt* wrappers)"
-            );
-            return fail_logged(EPT_HOOK2_ERR_DISASM, "plan_hook");
-        }
+        None => return fail_logged(EPT_HOOK2_ERR_DISASM, "plan_hook"),
     };
     let patched_len = hook_plan.patched_len;
-    crate::eprintln!(
-        "ept_hook plan: syscall={} fake_overwrite={HOOK_JUMP_LEN} patched_len={patched_len}",
-        hook_plan.syscall_number
-    );
-
+    if page_offset + patched_len > PAGE_SIZE {
+        return fail_logged(EPT_HOOK2_ERR_PAGE_BOUNDARY, "patched_len_oob");
+    }
     let fake_page = match alloc_page() {
         Some(ptr) => ptr,
         None => return fail_logged(EPT_HOOK2_ERR_ALLOC, "fake_page"),
@@ -111,35 +92,20 @@ pub(crate) fn install(
             return fail_logged(EPT_HOOK2_ERR_ALLOC, "trampoline_page");
         }
     };
-    crate::eprintln!(
-        "ept_hook pools: fake_page={fake_page:p} trampoline={trampoline:p}"
-    );
 
-    let trampoline_dump_len;
     unsafe {
         core::ptr::copy_nonoverlapping(page.as_ptr(), fake_page, PAGE_SIZE);
+        core::ptr::write_bytes(fake_page.add(page_offset), 0x90, patched_len);
         write_absolute_jump(
             core::slice::from_raw_parts_mut(fake_page.add(page_offset), HOOK_JUMP_LEN),
             hook_gva,
         );
-        write_syscall_trampoline(trampoline, hook_plan.syscall_number);
-        trampoline_dump_len = 11usize;
+        let original_bytes = &page[page_offset..page_offset + patched_len];
+        let resume_gva = target_gva + patched_len as u64;
+        write_resume_trampoline(trampoline, original_bytes, resume_gva);
     }
 
     let fake_hpa = WindowsOps.pa(fake_page.cast());
-    crate::eprintln!("ept_hook: fake_hpa={fake_hpa:#x}");
-    log_hex(
-        "ept_hook fake@offset",
-        unsafe { core::slice::from_raw_parts(fake_page.add(page_offset), HOOK_JUMP_LEN) },
-        HOOK_JUMP_LEN,
-    );
-    log_hex(
-        "ept_hook trampoline",
-        unsafe { core::slice::from_raw_parts(trampoline, trampoline_dump_len) },
-        48,
-    );
-
-    crate::eprintln!("ept_hook: hypercall install_ept_hook2 gpa={gpa_page_base:#x}");
     let (status, _, _, _) = hv::hypercall::issue(
         hv::hypercall::HV_HYPERCALL_INSTALL_EPT_HOOK2,
         gpa_page_base,
@@ -147,12 +113,7 @@ pub(crate) fn install(
         0,
         0,
     );
-    let hypercall_ok = status == hv::hypercall::HV_HYPERCALL_SUCCESS;
-    crate::eprintln!(
-        "ept_hook: hypercall install_ept_hook2 returned status={status} ok={hypercall_ok}"
-    );
-    if !hypercall_ok {
-        crate::eprintln!("ept_hook: hypercall install_ept_hook2 failed");
+    if status != hv::hypercall::HV_HYPERCALL_SUCCESS {
         unsafe {
             free_page(fake_page);
             free_page(trampoline);
@@ -166,11 +127,6 @@ pub(crate) fn install(
         trampoline: trampoline as usize,
     });
 
-    crate::eprintln!(
-        "ept_hook install ok: patched_len={patched_len} trampoline_gva={:#x} target_gpa={gpa_page_base:#x}",
-        trampoline as u64
-    );
-
     EptHook2Response {
         success: 1,
         error_code: 0,
@@ -183,14 +139,7 @@ pub(crate) fn install(
 
 /// Removes a previously installed hook and frees driver allocations.
 pub(crate) fn uninstall(request: EptUnhookRequest) -> u8 {
-    crate::eprintln!(
-        "ept_hook uninstall: pid={} target={:#x}",
-        request.process_id,
-        request.target_gva
-    );
-
     if request.target_gva == 0 {
-        crate::eprintln!("ept_hook uninstall failed: invalid target");
         return EPT_HOOK2_ERR_INVALID;
     }
 
@@ -206,15 +155,10 @@ pub(crate) fn uninstall(request: EptUnhookRequest) -> u8 {
     let page_gva = request.target_gva & !(PAGE_SIZE as u64 - 1);
     let gpa_page_base = match gva_to_gpa_cr3_switch(cr3, page_gva) {
         Ok(gpa) => gpa & !(PAGE_SIZE as u64 - 1),
-        Err(status) => {
-            crate::eprintln!("ept_hook uninstall: translate failed status={status}");
-            return EPT_HOOK2_ERR_TRANSLATE;
-        }
+        Err(_) => return EPT_HOOK2_ERR_TRANSLATE,
     };
-    crate::eprintln!("ept_hook uninstall: gpa_page={gpa_page_base:#x}");
 
     if !hv::hypercall::uninstall_ept_hook2(gpa_page_base) {
-        crate::eprintln!("ept_hook uninstall: hypercall failed");
         return EPT_HOOK2_ERR_HYPERVISOR;
     }
 
@@ -223,7 +167,6 @@ pub(crate) fn uninstall(request: EptUnhookRequest) -> u8 {
         .iter()
         .position(|entry| entry.gpa_page_base == gpa_page_base)
     else {
-        crate::eprintln!("ept_hook uninstall: allocation not found");
         return EPT_HOOK2_ERR_NOT_FOUND;
     };
     let entry = allocs.remove(index);
@@ -231,15 +174,12 @@ pub(crate) fn uninstall(request: EptUnhookRequest) -> u8 {
         free_page(entry.fake_page as *mut u8);
         free_page(entry.trampoline as *mut u8);
     }
-    crate::eprintln!("ept_hook uninstall ok");
     0
 }
 
 /// Frees all hook allocations during driver unload.
 pub(crate) fn uninstall_all() {
     let mut allocs = HOOK_ALLOCS.lock();
-    let count = allocs.len();
-    crate::eprintln!("ept_hook uninstall_all: count={count}");
     for entry in allocs.drain(..) {
         let _ = hv::hypercall::uninstall_ept_hook2(entry.gpa_page_base);
         unsafe {
@@ -270,36 +210,28 @@ struct HookPlan {
     syscall_number: u32,
 }
 
-/// Plans fake-page overwrite and syscall trampoline for `page[offset..]`.
+/// Plans fake-page overwrite length for `page[offset..]`.
 fn plan_hook(page: &[u8], offset: usize, syscall_number: u32) -> Option<HookPlan> {
+    let patched_len = crate::x86_insn::patch_len_at_least(page, offset, HOOK_JUMP_LEN)?;
+
     if syscall_number != 0 {
-        crate::eprintln!("ept_hook plan_hook: forced syscall={syscall_number}");
         return Some(HookPlan {
-            patched_len: HOOK_JUMP_LEN,
+            patched_len,
             syscall_number,
         });
     }
 
     if let Some(stub) = parse_syscall_stub(page, offset) {
-        crate::eprintln!(
-            "ept_hook plan_hook: syscall stub at target len={} syscall={}",
-            stub.stub_len,
-            stub.syscall_number
-        );
+        let stub_len = core::cmp::max(stub.stub_len, patched_len);
         return Some(HookPlan {
-            patched_len: stub.stub_len,
+            patched_len: stub_len,
             syscall_number: stub.syscall_number,
         });
     }
 
     if let Some(stub) = scan_syscall_stub(page, offset) {
-        crate::eprintln!(
-            "ept_hook plan_hook: syscall stub scan hit +{} syscall={}",
-            stub.offset,
-            stub.syscall_number
-        );
         return Some(HookPlan {
-            patched_len: HOOK_JUMP_LEN,
+            patched_len,
             syscall_number: stub.syscall_number,
         });
     }
@@ -357,30 +289,36 @@ fn parse_syscall_stub(page: &[u8], offset: usize) -> Option<ParsedSyscallStub> {
     None
 }
 
-/// Writes a position-independent `Nt*` syscall stub into `trampoline`.
-unsafe fn write_syscall_trampoline(trampoline: *mut u8, syscall_number: u32) {
+/// Trampoline: saved original bytes at the hook site, then branch to `resume_gva`.
+///
+/// `resume_gva` is `target_gva + patched_len`. Execution continues on the hooked
+/// page via the fake EPT view (full page copy), not by re-issuing `syscall`.
+unsafe fn write_resume_trampoline(
+    trampoline: *mut u8,
+    original: &[u8],
+    resume_gva: u64,
+) -> usize {
     unsafe {
-        let mut cursor = trampoline;
-        *cursor = 0x4C;
-        cursor = cursor.add(1);
-        *cursor = 0x8B;
-        cursor = cursor.add(1);
-        *cursor = 0xD1;
-        cursor = cursor.add(1);
-        *cursor = 0xB8;
-        cursor = cursor.add(1);
-        core::ptr::copy_nonoverlapping(
-            syscall_number.to_le_bytes().as_ptr(),
-            cursor,
-            4,
+        let len = original.len();
+        core::ptr::copy_nonoverlapping(original.as_ptr(), trampoline, len);
+        write_absolute_branch(
+            core::slice::from_raw_parts_mut(trampoline.add(len), BRANCH_LEN),
+            resume_gva,
         );
-        cursor = cursor.add(4);
-        *cursor = 0x0F;
-        cursor = cursor.add(1);
-        *cursor = 0x05;
-        cursor = cursor.add(1);
-        *cursor = 0xC3;
+        len + BRANCH_LEN
     }
+}
+
+const BRANCH_LEN: usize = 12;
+
+/// `mov rax, imm64; jmp rax` — position-independent branch to `target`.
+fn write_absolute_branch(buffer: &mut [u8], target: u64) {
+    assert!(buffer.len() >= BRANCH_LEN);
+    buffer[0] = 0x48;
+    buffer[1] = 0xB8;
+    buffer[2..10].copy_from_slice(&target.to_le_bytes());
+    buffer[10] = 0xFF;
+    buffer[11] = 0xE0;
 }
 
 /// TinyVT: `mov rax, imm64; push rax; ret` — no RIP-relative memory read on the fake page.

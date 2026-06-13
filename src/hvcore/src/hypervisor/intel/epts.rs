@@ -10,8 +10,8 @@ use crate::{hypervisor::intel::mtrr::MemoryType, hypervisor::platform_ops, hyper
 
 use super::mtrr::Mtrr;
 
-/// Maximum 2 MB → 4 KB splits (matches HyperDbg pre-allocated pool sizing).
-pub(crate) const MAX_EPT_DYNAMIC_SPLITS: usize = 16;
+/// Maximum 2 MB → 4 KB splits (runtime hooks + MTRR-crossing regions at init).
+pub(crate) const MAX_EPT_DYNAMIC_SPLITS: usize = 32;
 
 /// Identity-mapped EPT state with pre-allocated runtime 2 MB → 4 KB splits.
 pub(crate) struct EptState {
@@ -27,11 +27,32 @@ impl EptState {
     pub(crate) fn new() -> Self {
         let mut tables = zeroed_box::<Epts>();
         tables.build_identity();
-        Self {
+        let mut state = Self {
             tables,
             split_pages: zeroed_box(),
             split_pde_keys: [None; MAX_EPT_DYNAMIC_SPLITS],
             free_splits: [true; MAX_EPT_DYNAMIC_SPLITS],
+        };
+        state.pre_split_mtrr_crossing_regions();
+        state
+    }
+
+    /// Splits 2 MB regions that straddle MTRR boundaries at hypervisor init.
+    ///
+    /// Identity map uses 2 MB large pages where valid; Intel requires 4 KB leaf
+    /// entries with per-page memory types when a 2 MB window crosses an MTRR.
+    /// Runtime split during IOCTL hook install races other vCPUs and causes
+    /// EPT misconfiguration storms (e.g. gpa=0x2ed7000).
+    fn pre_split_mtrr_crossing_regions(&mut self) {
+        let mtrr = Mtrr::new();
+        let mut pa = LARGE_PAGE_SIZE as u64;
+        let end = PML4_SLOT_SIZE as u64;
+
+        while pa < end {
+            if !mtrr.region_valid_for_large_page(pa) {
+                let _ = self.split_2mb_to_4kb(pa);
+            }
+            pa += LARGE_PAGE_SIZE as u64;
         }
     }
 
@@ -55,9 +76,6 @@ impl EptState {
         }
 
         if !pde.large() {
-            crate::hv_dbg!(
-                "ept split: gpa={gpa:#x} already split pdpt={pdpt_index} pd={pd_index}"
-            );
             return Ok(());
         }
 
@@ -75,14 +93,6 @@ impl EptState {
         // large-page PFN encoding is not linear in the low 9 bits.
         let region_base = gpa & !(LARGE_PAGE_SIZE as u64 - 1);
         let mtrr = Mtrr::new();
-        if !mtrr.region_valid_for_large_page(region_base) {
-            crate::hv_dbg!(
-                "ept split: gpa={gpa:#x} region={region_base:#x} crosses MTRR boundary"
-            );
-        }
-        crate::hv_dbg!(
-            "ept split: gpa={gpa:#x} region={region_base:#x} pdpt={pdpt_index} pd={pd_index} slot={split_index}"
-        );
         let page_table = &mut self.split_pages[split_index];
         for (i, pte) in page_table.entries.iter_mut().enumerate() {
             let page_pa = region_base + (i as u64) * BASE_PAGE_SIZE as u64;
@@ -111,11 +121,6 @@ impl EptState {
         pde.set_writable(true);
         pde.set_executable(true);
         pde.set_pfn(pt_pa >> BASE_PAGE_SHIFT);
-        let pt_index = ((gpa >> 12) & 0x1FF) as usize;
-        let target_pfn = page_table.entries[pt_index].page_pfn();
-        crate::hv_dbg!(
-            "ept split: done pt_pa={pt_pa:#x} target_pte_idx={pt_index} target_pfn={target_pfn:#x}"
-        );
         invept_single_context(self.eptp());
         Ok(())
     }
@@ -148,6 +153,16 @@ impl EptState {
         }
 
         Err(EptError::InvalidAddress)
+    }
+
+    pub(crate) fn pde_entry(&self, gpa: u64) -> Result<EptEntry, EptError> {
+        const SIZE_512_GB: u64 = 512 * 1024 * 1024 * 1024;
+        if gpa >= SIZE_512_GB {
+            return Err(EptError::OutOfRange);
+        }
+        let pdpt_index = ((gpa >> 30) & 0x1FF) as usize;
+        let pd_index = ((gpa >> 21) & 0x1FF) as usize;
+        Ok(self.tables.pd[pdpt_index].entries[pd_index])
     }
 
     pub(crate) fn pml1_entry(&self, gpa: u64) -> Result<EptEntry, EptError> {

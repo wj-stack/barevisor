@@ -11,7 +11,8 @@ use crate::hypervisor::{
     hypercall::{
         HV_HYPERCALL_INSTALL_EPT_HOOK2, HV_HYPERCALL_INVALID, HV_HYPERCALL_INVALID_PARAMETER,
         HV_HYPERCALL_PING, HV_HYPERCALL_PING_RESPONSE, HV_HYPERCALL_READ_MEMORY,
-        HV_HYPERCALL_SUCCESS, HV_HYPERCALL_UNINSTALL_EPT_HOOK2, HV_HYPERCALL_WRITE_MEMORY,
+        HV_HYPERCALL_RESTORE_EPT_HOOK2, HV_HYPERCALL_SUCCESS, HV_HYPERCALL_UNINSTALL_EPT_HOOK2,
+        HV_HYPERCALL_WRITE_MEMORY,
         HV_MEM_IO_MAX_LEN,
     },
     registers::Registers,
@@ -75,30 +76,27 @@ fn virtualize_core<Arch: Architecture>(registers: &Registers) -> ! {
             VmExitReason::EptViolation(vcpu_id) => {
                 let qualification = intel::guest::vmcs_exit_qualification();
                 let guest_phys = intel::guest::vmcs_guest_physical_address();
-                crate::hv_dbg!(
-                    "host ept_violation: vcpu={vcpu_id} gpa={guest_phys:#x} qual={qualification:#x}"
-                );
                 if !intel::ept_hook::handle_ept_violation(vcpu_id, qualification, guest_phys) {
-                    crate::hv_dbg!(
-                        "host ept_violation: unhandled vcpu={vcpu_id} gpa={guest_phys:#x}"
-                    );
                     log::error!("Unexpected EPT violation");
                 }
             }
-            VmExitReason::MonitorTrapFlag(vcpu_id) => {
-                if !intel::ept_hook::handle_mtf(vcpu_id) {
-                    crate::hv_dbg!("host mtf: unhandled vcpu={vcpu_id}");
-                    log::error!("Unexpected MTF VM-exit");
-                }
+            VmExitReason::MonitorTrapFlag(_) => {
+                log::error!("Unexpected MTF VM-exit");
             }
             VmExitReason::EptMisconfiguration => {
+                static MISCONFIG_COUNT: core::sync::atomic::AtomicU64 =
+                    core::sync::atomic::AtomicU64::new(0);
                 let guest_phys = intel::guest::vmcs_guest_physical_address();
                 let qualification = intel::guest::vmcs_exit_qualification();
+                let guest_rip = intel::guest::vmcs_guest_rip();
+                let guest_gva = intel::guest::vmcs_guest_linear_address();
                 let page_base = guest_phys & !0xFFF;
+                let n = MISCONFIG_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
                 crate::hv_dbg!(
-                    "host ept_misconfig: gpa={guest_phys:#x} page={page_base:#x} qual={qualification:#x}"
+                    "host ept_misconfig #{n}: gpa={guest_phys:#x} page={page_base:#x} qual={qualification:#x} rip={guest_rip:#x} gva={guest_gva:#x}"
                 );
-                match intel::guest::ept_state().lock().pml1_entry(page_base) {
+                let ept = intel::guest::ept_state().lock();
+                match ept.pml1_entry(page_base) {
                     Ok(entry) => {
                         let (pfn, r, w, x) = entry.access_summary();
                         crate::hv_dbg!(
@@ -113,8 +111,23 @@ fn virtualize_core<Arch: Architecture>(registers: &Registers) -> ! {
                     }
                     Err(err) => {
                         crate::hv_dbg!("host ept_misconfig pte lookup failed: {err:?}");
+                        match ept.pde_entry(page_base) {
+                            Ok(pde) => {
+                                crate::hv_dbg!(
+                                    "host ept_misconfig pde: raw={:#x} pfn={:#x} large={} mt={}",
+                                    pde.raw_value(),
+                                    pde.page_pfn(),
+                                    u8::from(pde.is_large()),
+                                    pde.memory_type_value()
+                                );
+                            }
+                            Err(pde_err) => {
+                                crate::hv_dbg!("host ept_misconfig pde lookup failed: {pde_err:?}");
+                            }
+                        }
                     }
                 }
+                drop(ept);
                 log::error!("EPT misconfiguration at gpa={guest_phys:#x}");
             }
             VmExitReason::InitSignal | VmExitReason::StartupIpi | VmExitReason::NestedPageFault => {
@@ -221,6 +234,7 @@ fn handle_vmcall<T: Guest>(guest: &mut T, info: &InstructionInfo) {
         }
         HV_HYPERCALL_INSTALL_EPT_HOOK2 => handle_install_ept_hook2(guest),
         HV_HYPERCALL_UNINSTALL_EPT_HOOK2 => handle_uninstall_ept_hook2(guest),
+        HV_HYPERCALL_RESTORE_EPT_HOOK2 => handle_restore_ept_hook2(guest),
         _ => {
             crate::hv_dbg!("host vmcall: unknown hypercall={hypercall:#x}");
             HV_HYPERCALL_INVALID
@@ -263,66 +277,51 @@ fn handle_memory_hypercall<T: Guest>(guest: &mut T, hypercall: u64) -> u64 {
 
 fn handle_install_ept_hook2<T: Guest>(guest: &mut T) -> u64 {
     if !is_intel_processor() {
-        crate::hv_dbg!("host install_ept_hook2: not intel");
         return HV_HYPERCALL_INVALID;
     }
     let gpa_page_base = guest.regs().rcx & !0xFFF;
     let fake_page_hpa = guest.regs().rdx & !0xFFF;
-    let guest_rcx = guest.regs().rcx;
-    let guest_rdx = guest.regs().rdx;
-    let guest_rip = guest.regs().rip;
-    crate::hv_dbg!(
-        "host install_ept_hook2: rcx={guest_rcx:#x} rdx={guest_rdx:#x} gpa={gpa_page_base:#x} fake={fake_page_hpa:#x} rip={guest_rip:#x}"
-    );
     if gpa_page_base == 0 || fake_page_hpa == 0 {
-        crate::hv_dbg!("host install_ept_hook2: invalid_parameter");
         return HV_HYPERCALL_INVALID_PARAMETER;
     }
 
     let mut ept = intel::guest::ept_state().lock();
     match intel::ept_hook::install(&mut ept, gpa_page_base, fake_page_hpa) {
-        Ok(()) => {
-            crate::hv_dbg!("host install_ept_hook2: success");
-            HV_HYPERCALL_SUCCESS
-        }
-        Err(err) => {
-            crate::hv_dbg!(
-                "host install_ept_hook2: failed err={}",
-                err.as_str()
-            );
-            HV_HYPERCALL_INVALID_PARAMETER
-        }
+        Ok(()) => HV_HYPERCALL_SUCCESS,
+        Err(_) => HV_HYPERCALL_INVALID_PARAMETER,
     }
 }
 
 fn handle_uninstall_ept_hook2<T: Guest>(guest: &mut T) -> u64 {
     if !is_intel_processor() {
-        crate::hv_dbg!("host uninstall_ept_hook2: not intel");
         return HV_HYPERCALL_INVALID;
     }
     let gpa_page_base = guest.regs().rcx & !0xFFF;
-    let guest_rip = guest.regs().rip;
-    crate::hv_dbg!(
-        "host uninstall_ept_hook2: gpa={gpa_page_base:#x} rip={guest_rip:#x}"
-    );
     if gpa_page_base == 0 {
-        crate::hv_dbg!("host uninstall_ept_hook2: invalid_parameter");
         return HV_HYPERCALL_INVALID_PARAMETER;
     }
 
     let mut ept = intel::guest::ept_state().lock();
     match intel::ept_hook::uninstall(&mut ept, gpa_page_base) {
-        Ok(()) => {
-            crate::hv_dbg!("host uninstall_ept_hook2: success");
-            HV_HYPERCALL_SUCCESS
-        }
-        Err(err) => {
-            crate::hv_dbg!(
-                "host uninstall_ept_hook2: failed err={}",
-                err.as_str()
-            );
-            HV_HYPERCALL_INVALID_PARAMETER
-        }
+        Ok(()) => HV_HYPERCALL_SUCCESS,
+        Err(_) => HV_HYPERCALL_INVALID_PARAMETER,
+    }
+}
+
+fn handle_restore_ept_hook2<T: Guest>(guest: &mut T) -> u64 {
+    if !is_intel_processor() {
+        return HV_HYPERCALL_INVALID;
+    }
+    let gpa_page_base = guest.regs().rcx & !0xFFF;
+    if gpa_page_base == 0 {
+        return HV_HYPERCALL_INVALID_PARAMETER;
+    }
+
+    let mut ept = intel::guest::ept_state().lock();
+    if intel::ept_hook::restore_installed_view(&mut ept, gpa_page_base) {
+        HV_HYPERCALL_SUCCESS
+    } else {
+        HV_HYPERCALL_INVALID_PARAMETER
     }
 }
 

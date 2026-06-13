@@ -670,6 +670,14 @@ pub(crate) fn vmcs_guest_physical_address() -> u64 {
     vmread(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL)
 }
 
+pub(crate) fn vmcs_guest_rip() -> u64 {
+    vmread(vmcs::guest::RIP)
+}
+
+pub(crate) fn vmcs_guest_linear_address() -> u64 {
+    vmread(vmcs::ro::GUEST_LINEAR_ADDR)
+}
+
 pub(crate) fn set_monitor_trap_flag(enabled: bool) -> bool {
     let current = vmread(vmcs::control::PRIMARY_PROCBASED_EXEC_CONTROLS);
     let requested = if enabled {

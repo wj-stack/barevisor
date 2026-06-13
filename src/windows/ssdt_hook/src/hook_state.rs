@@ -35,11 +35,10 @@ static HOOK_STATE: Mutex<HookState> = Mutex::new(HookState {
     syscall_number: 0,
     trampoline: None,
 });
-static HOOK_HITS: AtomicU64 = AtomicU64::new(0);
 static TRAMPOLINE_GVA: AtomicU64 = AtomicU64::new(0);
+static TARGET_GPA: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn init_target() -> Result<(), NTSTATUS> {
-    crate::eprintln!("ssdt_hook: resolving SSDT target {HOOK_EXPORT}");
     let resolved = kernel_ssdt::resolve_ssdt_function(HOOK_EXPORT)?;
     let hook_gva = crate::hooked_nt_open_process as *const () as u64;
     let mut state = HOOK_STATE.lock();
@@ -47,15 +46,6 @@ pub(crate) fn init_target() -> Result<(), NTSTATUS> {
     state.hook_gva = hook_gva;
     state.syscall_number = resolved.syscall_number;
     state.trampoline = None;
-
-    crate::eprintln!(
-        "SSDT target {HOOK_EXPORT} = {:#x} (syscall={})",
-        resolved.address,
-        resolved.syscall_number
-    );
-    crate::eprintln!("hook handler (hooked_nt_open_process) = {hook_gva:#x}");
-    crate::eprintln!("run: win_hv_client ssdt-hook info");
-    crate::eprintln!("run: win_hv_client ssdt-hook install");
     Ok(())
 }
 
@@ -81,17 +71,14 @@ pub(crate) fn install_hook() -> Result<EptHook2Response, NTSTATUS> {
     let (target_gva, hook_gva, syscall_number) = {
         let state = HOOK_STATE.lock();
         if state.target_gva == 0 {
-            crate::eprintln!("ssdt_hook install: target not resolved");
             return Err(STATUS_NOT_FOUND);
         }
         (state.target_gva, state.hook_gva, state.syscall_number)
     };
 
-    crate::eprintln!(
-        "ssdt_hook install: IOCTL_EPT_HOOK2 target={target_gva:#x} hook={hook_gva:#x} syscall={syscall_number}"
-    );
     let response = install_ept_hook(target_gva, hook_gva, syscall_number)?;
     TRAMPOLINE_GVA.store(response.trampoline_gva, Ordering::Release);
+    TARGET_GPA.store(response.target_gpa, Ordering::Release);
     let trampoline = unsafe {
         core::mem::transmute::<u64, NtOpenProcessFn>(response.trampoline_gva)
     };
@@ -100,25 +87,19 @@ pub(crate) fn install_hook() -> Result<EptHook2Response, NTSTATUS> {
         state.trampoline = Some(trampoline);
     }
 
-    crate::eprintln!(
-        "EPT hook installed: target={target_gva:#x} hook={hook_gva:#x} trampoline={:#x} patched_len={}",
-        response.trampoline_gva, response.patched_len
-    );
     Ok(response)
 }
 
 pub(crate) fn uninstall_hook() -> Result<(), NTSTATUS> {
     let target_gva = HOOK_STATE.lock().target_gva;
     if target_gva == 0 {
-        crate::eprintln!("ssdt_hook uninstall: nothing to remove");
         return Ok(());
     }
-    crate::eprintln!("ssdt_hook uninstall: IOCTL_EPT_UNHOOK target={target_gva:#x}");
     uninstall_ept_hook(target_gva)?;
     TRAMPOLINE_GVA.store(0, Ordering::Release);
+    TARGET_GPA.store(0, Ordering::Release);
     let mut state = HOOK_STATE.lock();
     state.trampoline = None;
-    crate::eprintln!("EPT hook removed for target={target_gva:#x}");
     Ok(())
 }
 
@@ -128,21 +109,18 @@ pub(crate) fn on_hook_hit(
     object_attributes: *mut OBJECT_ATTRIBUTES,
     client_id: *mut ClientId,
 ) -> NTSTATUS {
-    let hits = HOOK_HITS.fetch_add(1, Ordering::Relaxed) + 1;
-    let pid = if client_id.is_null() {
-        0
-    } else {
-        unsafe { (*client_id).unique_process as u32 }
-    };
-    crate::eprintln!("hooked NtOpenProcess hit #{hits} pid={pid} access={desired_access:#x}");
-
-    let original = TRAMPOLINE_GVA.load(Ordering::Acquire);
-    if original == 0 {
-        crate::eprintln!("hooked NtOpenProcess hit #{hits}: trampoline missing");
+    let trampoline = TRAMPOLINE_GVA.load(Ordering::Acquire);
+    if trampoline == 0 {
         return STATUS_UNSUCCESSFUL;
     }
-    let original: NtOpenProcessFn = unsafe { core::mem::transmute(original) };
-    unsafe { original(process_handle, desired_access, object_attributes, client_id) }
+    let original: NtOpenProcessFn = unsafe { core::mem::transmute(trampoline) };
+    let status =
+        unsafe { original(process_handle, desired_access, object_attributes, client_id) };
+    let target_gpa = TARGET_GPA.load(Ordering::Acquire);
+    if target_gpa != 0 {
+        let _ = hv::hypercall::restore_ept_hook2(target_gpa);
+    }
+    status
 }
 
 unsafe extern "system" {
@@ -215,7 +193,6 @@ fn install_ept_hook(
     syscall_number: u32,
 ) -> Result<EptHook2Response, NTSTATUS> {
     let handle = open_barevisor_device()?;
-    crate::eprintln!("ssdt_hook: opened \\\\??\\\\BarevisorHv handle={handle:?}");
     let request = EptHook2Request {
         process_id: 0,
         syscall_number,
@@ -246,15 +223,8 @@ fn install_ept_hook(
         });
     }
     if !NT_SUCCESS(status) {
-        crate::eprintln!("IOCTL_EPT_HOOK2 NTSTATUS failed: {status:#010x}");
         return Err(status);
     }
-    crate::eprintln!(
-        "IOCTL_EPT_HOOK2 ok: patched_len={} trampoline={:#x} target_gpa={:#x}",
-        response.patched_len,
-        response.trampoline_gva,
-        response.target_gpa
-    );
     Ok(response)
 }
 
@@ -282,7 +252,6 @@ fn uninstall_ept_hook(target_gva: u64) -> Result<(), NTSTATUS> {
         );
         return Err(STATUS_UNSUCCESSFUL);
     }
-    crate::eprintln!("IOCTL_EPT_UNHOOK ok");
     Ok(())
 }
 

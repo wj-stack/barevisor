@@ -21,6 +21,7 @@ test = false
 bench = false
 
 [dependencies]
+hv = { path = "../../hvcore" }
 kernel_ssdt = { path = "../kernel_ssdt" }
 shared-contract = { path = "../shared-contract" }
 spin = "0.11.0"

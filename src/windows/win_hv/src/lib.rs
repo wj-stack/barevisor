@@ -7,6 +7,7 @@ mod device;
 mod eprintln;
 mod ept_hook;
 mod hook_log;
+mod x86_insn;
 mod ops;
 mod paging;
 mod process;

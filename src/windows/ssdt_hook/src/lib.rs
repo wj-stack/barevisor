@@ -43,7 +43,7 @@ extern "C" fn driver_entry(
         return STATUS_NOT_FOUND;
     }
 
-    eprintln!("Ready. Use win_hv_client ssdt-hook info / install");
+    eprintln!("Loaded ssdt_hook.sys");
     STATUS_SUCCESS
 }
 
