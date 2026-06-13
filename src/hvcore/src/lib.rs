@@ -7,6 +7,7 @@ pub mod hypervisor;
 pub use hypervisor::SharedHostData;
 #[cfg(not(test))]
 pub use hypervisor::allocator;
+pub use hypervisor::debug_out::set_debug_print;
 pub use hypervisor::gdt_tss::GdtTss;
 pub use hypervisor::hypercall;
 pub use hypervisor::interrupt_handlers::InterruptDescriptorTable;

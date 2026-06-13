@@ -1,4 +1,5 @@
 pub fn panic_impl(info: &core::panic::PanicInfo<'_>) -> ! {
+    crate::hv_dbg!("PANIC: {info}");
     log::error!("{info}");
     loop {
         unsafe {

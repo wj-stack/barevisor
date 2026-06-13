@@ -23,6 +23,30 @@ macro_rules! print {
     };
 }
 
+/// Debug prints a preformatted ASCII line to the kernel debugger.
+pub(crate) fn debug_print_str(message: &str) {
+    if !message.is_ascii() {
+        return;
+    }
+
+    let mut buffer = [0u8; 384];
+    let mut length = core::cmp::min(buffer.len() - 2, message.len());
+    buffer[..length].copy_from_slice(&message.as_bytes()[..length]);
+    if length == 0 || message.as_bytes()[length - 1] != b'\n' {
+        buffer[length] = b'\n';
+        length += 1;
+    }
+    let msg_ptr = buffer.as_mut_ptr().cast::<i8>();
+    let _ = unsafe {
+        DbgPrintEx(
+            DPFLTR_IHVDRIVER_ID as _,
+            DPFLTR_ERROR_LEVEL,
+            c"%s".as_ptr(),
+            msg_ptr,
+        )
+    };
+}
+
 #[doc(hidden)]
 pub(crate) fn print(args: core::fmt::Arguments<'_>) {
     Write::write_fmt(&mut *DEBUG_PRINTER.lock(), args).unwrap();

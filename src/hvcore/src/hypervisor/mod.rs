@@ -5,6 +5,7 @@ pub mod allocator;
 mod amd;
 mod apic_id;
 pub mod gdt_tss;
+pub mod debug_out;
 mod host;
 pub mod hypercall;
 mod intel;

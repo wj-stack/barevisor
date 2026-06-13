@@ -94,6 +94,7 @@ impl Guest for VmxGuest {
         const VMX_EXIT_REASON_XSETBV: u16 = 55;
         const VMX_EXIT_REASON_VMCALL: u16 = 18;
         const VMX_EXIT_REASON_EPT_VIOLATION: u16 = 48;
+        const VMX_EXIT_REASON_EPT_MISCONFIGURATION: u16 = 49;
         const VMX_EXIT_REASON_MTF: u16 = 37;
 
         vmwrite(vmcs::guest::RIP, self.registers.rip);
@@ -104,6 +105,12 @@ impl Guest for VmxGuest {
         log::trace!("Entering the guest");
         let flags = unsafe { run_vmx_guest(&mut self.registers) };
         if let Err(err) = vmx_succeed(RFlags::from_raw(flags)) {
+            crate::hv_dbg!(
+                "vmx resume/inject failed: {err} rip={:#x} rsp={:#x} rflags={:#x}",
+                self.registers.rip,
+                self.registers.rsp,
+                flags
+            );
             panic!("{err}");
         }
         log::trace!("Exited the guest");
@@ -138,13 +145,17 @@ impl Guest for VmxGuest {
                 next_rip: self.registers.rip + vmread(vmcs::ro::VMEXIT_INSTRUCTION_LEN),
             }),
             VMX_EXIT_REASON_EPT_VIOLATION => VmExitReason::EptViolation(self.id),
+            VMX_EXIT_REASON_EPT_MISCONFIGURATION => VmExitReason::EptMisconfiguration,
             VMX_EXIT_REASON_MTF => VmExitReason::MonitorTrapFlag(self.id),
             _ => {
+                let exit_reason = vmread(vmcs::ro::EXIT_REASON);
+                let guest_rip = vmread(vmcs::guest::RIP);
+                let guest_phys = vmread(vmcs::ro::GUEST_PHYSICAL_ADDR_FULL);
+                crate::hv_dbg!(
+                    "unhandled vm-exit: reason={exit_reason:#x} rip={guest_rip:#x} gpa={guest_phys:#x}"
+                );
                 log::error!("{:#x?}", self.vmcs);
-                panic!(
-                    "Unhandled VM-exit reason: {:?}",
-                    vmread(vmcs::ro::EXIT_REASON)
-                )
+                panic!("Unhandled VM-exit reason: {:?}", exit_reason);
             }
         }
     }

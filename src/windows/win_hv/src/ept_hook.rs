@@ -5,9 +5,8 @@ use core::mem::size_of;
 use hv::platform_ops::PlatformOps;
 use shared_contract::{
     EPT_HOOK2_ERR_ALLOC, EPT_HOOK2_ERR_CR3, EPT_HOOK2_ERR_DISASM, EPT_HOOK2_ERR_GPA_RANGE,
-    EPT_HOOK2_ERR_HYPERVISOR, EPT_HOOK2_ERR_INVALID, EPT_HOOK2_ERR_NO_EXEC_ONLY,
-    EPT_HOOK2_ERR_NOT_FOUND, EPT_HOOK2_ERR_PAGE_BOUNDARY, EPT_HOOK2_ERR_TRANSLATE,
-    EptHook2Response, EptUnhookRequest,
+    EPT_HOOK2_ERR_HYPERVISOR, EPT_HOOK2_ERR_INVALID, EPT_HOOK2_ERR_NOT_FOUND,
+    EPT_HOOK2_ERR_PAGE_BOUNDARY, EPT_HOOK2_ERR_TRANSLATE, EptHook2Response, EptUnhookRequest,
 };
 use spin::Mutex;
 use wdk_sys::{
@@ -20,7 +19,7 @@ use crate::ops::WindowsOps;
 use crate::paging::{cr3_switch_failure, gpa_to_hpa, gva_to_gpa_cr3_switch, read_hpa};
 
 const PAGE_SIZE: usize = 4096;
-const HOOK_JUMP_LEN: usize = 19;
+const HOOK_JUMP_LEN: usize = 12;
 const SIZE_512_GB: u64 = 512 * 1024 * 1024 * 1024;
 const POOL_TAG: u32 = u32::from_ne_bytes(*b"EptH");
 
@@ -46,11 +45,6 @@ pub(crate) fn install(
     if target_gva == 0 || hook_gva == 0 {
         return fail_logged(EPT_HOOK2_ERR_INVALID, "bad_target_or_hook");
     }
-    if !ept_execute_only_supported() {
-        return fail_logged(EPT_HOOK2_ERR_NO_EXEC_ONLY, "ept_execute_only");
-    }
-    crate::eprintln!("ept_hook: EPT execute-only supported");
-
     let cr3 = if process_id != 0 {
         match crate::process::get_kernel_cr3(process_id) {
             Ok(cr3) => cr3,
@@ -146,8 +140,17 @@ pub(crate) fn install(
     );
 
     crate::eprintln!("ept_hook: hypercall install_ept_hook2 gpa={gpa_page_base:#x}");
-    let hypercall_ok = hv::hypercall::install_ept_hook2(gpa_page_base, fake_hpa);
-    crate::eprintln!("ept_hook: hypercall install_ept_hook2 returned ok={hypercall_ok}");
+    let (status, _, _, _) = hv::hypercall::issue(
+        hv::hypercall::HV_HYPERCALL_INSTALL_EPT_HOOK2,
+        gpa_page_base,
+        fake_hpa,
+        0,
+        0,
+    );
+    let hypercall_ok = status == hv::hypercall::HV_HYPERCALL_SUCCESS;
+    crate::eprintln!(
+        "ept_hook: hypercall install_ept_hook2 returned status={status} ok={hypercall_ok}"
+    );
     if !hypercall_ok {
         crate::eprintln!("ept_hook: hypercall install_ept_hook2 failed");
         unsafe {
@@ -380,18 +383,14 @@ unsafe fn write_syscall_trampoline(trampoline: *mut u8, syscall_number: u32) {
     }
 }
 
+/// TinyVT: `mov rax, imm64; push rax; ret` — no RIP-relative memory read on the fake page.
 fn write_absolute_jump(buffer: &mut [u8], target: u64) {
     assert!(buffer.len() >= HOOK_JUMP_LEN);
-    buffer[0] = 0xE8;
-    buffer[1..5].copy_from_slice(&0u32.to_le_bytes());
-    buffer[5] = 0x68;
-    buffer[6..10].copy_from_slice(&(target as u32).to_le_bytes());
-    buffer[10] = 0xC7;
-    buffer[11] = 0x44;
-    buffer[12] = 0x24;
-    buffer[13] = 0x04;
-    buffer[14..18].copy_from_slice(&((target >> 32) as u32).to_le_bytes());
-    buffer[18] = 0xC3;
+    buffer[0] = 0x48;
+    buffer[1] = 0xB8;
+    buffer[2..10].copy_from_slice(&target.to_le_bytes());
+    buffer[10] = 0x50;
+    buffer[11] = 0xC3;
 }
 
 fn alloc_page() -> Option<*mut u8> {
@@ -416,21 +415,6 @@ unsafe fn free_page(ptr: *mut u8) {
     if !ptr.is_null() {
         unsafe { ExFreePoolWithTag(ptr.cast(), POOL_TAG) };
     }
-}
-
-fn ept_execute_only_supported() -> bool {
-    const IA32_VMX_EPT_VPID_CAP: u32 = 0x48C;
-    let (low, _high): (u32, u32);
-    unsafe {
-        core::arch::asm!(
-            "rdmsr",
-            in("ecx") IA32_VMX_EPT_VPID_CAP,
-            out("eax") low,
-            out("edx") _high,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-    low & 1 != 0
 }
 
 const _: () = assert!(size_of::<EptHook2Response>() == 24);

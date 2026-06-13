@@ -73,18 +73,49 @@ fn virtualize_core<Arch: Architecture>(registers: &Registers) -> ! {
             VmExitReason::XSetBv(info) => handle_xsetbv(guest, &info),
             VmExitReason::VmCall(info) => handle_vmcall(guest, &info),
             VmExitReason::EptViolation(vcpu_id) => {
-                if !intel::ept_hook::handle_ept_violation(
-                    vcpu_id,
-                    intel::guest::vmcs_exit_qualification(),
-                    intel::guest::vmcs_guest_physical_address(),
-                ) {
+                let qualification = intel::guest::vmcs_exit_qualification();
+                let guest_phys = intel::guest::vmcs_guest_physical_address();
+                crate::hv_dbg!(
+                    "host ept_violation: vcpu={vcpu_id} gpa={guest_phys:#x} qual={qualification:#x}"
+                );
+                if !intel::ept_hook::handle_ept_violation(vcpu_id, qualification, guest_phys) {
+                    crate::hv_dbg!(
+                        "host ept_violation: unhandled vcpu={vcpu_id} gpa={guest_phys:#x}"
+                    );
                     log::error!("Unexpected EPT violation");
                 }
             }
             VmExitReason::MonitorTrapFlag(vcpu_id) => {
                 if !intel::ept_hook::handle_mtf(vcpu_id) {
+                    crate::hv_dbg!("host mtf: unhandled vcpu={vcpu_id}");
                     log::error!("Unexpected MTF VM-exit");
                 }
+            }
+            VmExitReason::EptMisconfiguration => {
+                let guest_phys = intel::guest::vmcs_guest_physical_address();
+                let qualification = intel::guest::vmcs_exit_qualification();
+                let page_base = guest_phys & !0xFFF;
+                crate::hv_dbg!(
+                    "host ept_misconfig: gpa={guest_phys:#x} page={page_base:#x} qual={qualification:#x}"
+                );
+                match intel::guest::ept_state().lock().pml1_entry(page_base) {
+                    Ok(entry) => {
+                        let (pfn, r, w, x) = entry.access_summary();
+                        crate::hv_dbg!(
+                            "host ept_misconfig pte: raw={:#x} pfn={pfn:#x} r={} w={} x={} large={} mt={}",
+                            entry.raw_value(),
+                            u8::from(r),
+                            u8::from(w),
+                            u8::from(x),
+                            u8::from(entry.is_large()),
+                            entry.memory_type_value()
+                        );
+                    }
+                    Err(err) => {
+                        crate::hv_dbg!("host ept_misconfig pte lookup failed: {err:?}");
+                    }
+                }
+                log::error!("EPT misconfiguration at gpa={guest_phys:#x}");
             }
             VmExitReason::InitSignal | VmExitReason::StartupIpi | VmExitReason::NestedPageFault => {
             }
@@ -190,7 +221,10 @@ fn handle_vmcall<T: Guest>(guest: &mut T, info: &InstructionInfo) {
         }
         HV_HYPERCALL_INSTALL_EPT_HOOK2 => handle_install_ept_hook2(guest),
         HV_HYPERCALL_UNINSTALL_EPT_HOOK2 => handle_uninstall_ept_hook2(guest),
-        _ => HV_HYPERCALL_INVALID,
+        _ => {
+            crate::hv_dbg!("host vmcall: unknown hypercall={hypercall:#x}");
+            HV_HYPERCALL_INVALID
+        }
     };
 
     guest.regs().rax = status;
@@ -229,34 +263,66 @@ fn handle_memory_hypercall<T: Guest>(guest: &mut T, hypercall: u64) -> u64 {
 
 fn handle_install_ept_hook2<T: Guest>(guest: &mut T) -> u64 {
     if !is_intel_processor() {
+        crate::hv_dbg!("host install_ept_hook2: not intel");
         return HV_HYPERCALL_INVALID;
     }
     let gpa_page_base = guest.regs().rcx & !0xFFF;
     let fake_page_hpa = guest.regs().rdx & !0xFFF;
+    let guest_rcx = guest.regs().rcx;
+    let guest_rdx = guest.regs().rdx;
+    let guest_rip = guest.regs().rip;
+    crate::hv_dbg!(
+        "host install_ept_hook2: rcx={guest_rcx:#x} rdx={guest_rdx:#x} gpa={gpa_page_base:#x} fake={fake_page_hpa:#x} rip={guest_rip:#x}"
+    );
     if gpa_page_base == 0 || fake_page_hpa == 0 {
+        crate::hv_dbg!("host install_ept_hook2: invalid_parameter");
         return HV_HYPERCALL_INVALID_PARAMETER;
     }
 
     let mut ept = intel::guest::ept_state().lock();
     match intel::ept_hook::install(&mut ept, gpa_page_base, fake_page_hpa) {
-        Ok(()) => HV_HYPERCALL_SUCCESS,
-        Err(_) => HV_HYPERCALL_INVALID_PARAMETER,
+        Ok(()) => {
+            crate::hv_dbg!("host install_ept_hook2: success");
+            HV_HYPERCALL_SUCCESS
+        }
+        Err(err) => {
+            crate::hv_dbg!(
+                "host install_ept_hook2: failed err={}",
+                err.as_str()
+            );
+            HV_HYPERCALL_INVALID_PARAMETER
+        }
     }
 }
 
 fn handle_uninstall_ept_hook2<T: Guest>(guest: &mut T) -> u64 {
     if !is_intel_processor() {
+        crate::hv_dbg!("host uninstall_ept_hook2: not intel");
         return HV_HYPERCALL_INVALID;
     }
     let gpa_page_base = guest.regs().rcx & !0xFFF;
+    let guest_rip = guest.regs().rip;
+    crate::hv_dbg!(
+        "host uninstall_ept_hook2: gpa={gpa_page_base:#x} rip={guest_rip:#x}"
+    );
     if gpa_page_base == 0 {
+        crate::hv_dbg!("host uninstall_ept_hook2: invalid_parameter");
         return HV_HYPERCALL_INVALID_PARAMETER;
     }
 
     let mut ept = intel::guest::ept_state().lock();
     match intel::ept_hook::uninstall(&mut ept, gpa_page_base) {
-        Ok(()) => HV_HYPERCALL_SUCCESS,
-        Err(_) => HV_HYPERCALL_INVALID_PARAMETER,
+        Ok(()) => {
+            crate::hv_dbg!("host uninstall_ept_hook2: success");
+            HV_HYPERCALL_SUCCESS
+        }
+        Err(err) => {
+            crate::hv_dbg!(
+                "host uninstall_ept_hook2: failed err={}",
+                err.as_str()
+            );
+            HV_HYPERCALL_INVALID_PARAMETER
+        }
     }
 }
 
@@ -311,6 +377,7 @@ pub(crate) enum VmExitReason {
     XSetBv(InstructionInfo),
     VmCall(InstructionInfo),
     EptViolation(usize),
+    EptMisconfiguration,
     MonitorTrapFlag(usize),
     InitSignal,
     StartupIpi,

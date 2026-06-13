@@ -44,6 +44,7 @@ extern "C" fn driver_entry(
 
     // Register the platform specific API.
     hv::platform_ops::init(Box::new(ops::WindowsOps));
+    hv::set_debug_print(crate::eprintln::debug_print_str);
     eprintln!("PlatformOps registered");
 
     let status = device::create_device(driver);

@@ -3,7 +3,7 @@ use core::{arch::asm, ops::Range};
 use alloc::vec::Vec;
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
-use x86::bits64::paging::BASE_PAGE_SHIFT;
+use x86::bits64::paging::{BASE_PAGE_SHIFT, LARGE_PAGE_SIZE};
 
 use crate::hypervisor::x86_instructions::rdmsr;
 
@@ -33,6 +33,46 @@ impl Mtrr {
             fixed: Self::convert_from_raw_fixed(&raw_mtrrs.fixed),
             variable: Self::convert_from_raw_variable(&raw_mtrrs.variable),
         }
+    }
+
+    pub(crate) fn ept_memory_type_for_page(&self, page_pa: u64) -> MemoryType {
+        if page_pa < 0x10_0000 {
+            if let Some(memory_type) = self.find_from_fixed(page_pa..page_pa + 1) {
+                return memory_type;
+            }
+        }
+
+        let mut target = None::<MemoryType>;
+        for mtrr in &self.variable {
+            if page_pa >= mtrr.range.start && page_pa < mtrr.range.end {
+                if mtrr.memory_type == MemoryType::Uncachable {
+                    return MemoryType::Uncachable;
+                }
+                if target == Some(MemoryType::WriteBack)
+                    && mtrr.memory_type == MemoryType::WriteThrough
+                {
+                    target = Some(MemoryType::WriteThrough);
+                    continue;
+                }
+                target = Some(mtrr.memory_type);
+            }
+        }
+        target.unwrap_or(self.default_memory_type)
+    }
+
+    /// Returns whether a 2 MB region can be mapped with a single large-page entry.
+    pub(crate) fn region_valid_for_large_page(&self, region_base: u64) -> bool {
+        let region_end = region_base + LARGE_PAGE_SIZE as u64 - 1;
+        for mtrr in self.fixed.iter().chain(self.variable.iter()) {
+            let mtrr_start = mtrr.range.start;
+            let mtrr_end = mtrr.range.end.saturating_sub(1);
+            if (region_base <= mtrr_end && region_end > mtrr_end)
+                || (region_base < mtrr_start && region_end >= mtrr_start)
+            {
+                return false;
+            }
+        }
+        true
     }
 
     pub(crate) fn find(&self, range: Range<u64>) -> Option<MemoryType> {
