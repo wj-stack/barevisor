@@ -1,0 +1,12 @@
+[package]
+name = "shared-contract"
+description = "Shared IOCTL codes and buffer layouts for win_hv and its client"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

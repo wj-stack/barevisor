@@ -8,6 +8,11 @@ use x86::{
 use crate::hypervisor::{
     HV_CPUID_INTERFACE, HV_CPUID_VENDOR_AND_MAX_FUNCTIONS, OUR_HV_VENDOR_NAME_EBX,
     OUR_HV_VENDOR_NAME_ECX, OUR_HV_VENDOR_NAME_EDX, apic_id,
+    hypercall::{
+        HV_HYPERCALL_INVALID, HV_HYPERCALL_INVALID_PARAMETER, HV_HYPERCALL_PING,
+        HV_HYPERCALL_PING_RESPONSE, HV_HYPERCALL_READ_MEMORY, HV_HYPERCALL_SUCCESS,
+        HV_HYPERCALL_WRITE_MEMORY, HV_MEM_IO_MAX_LEN,
+    },
     registers::Registers,
     x86_instructions::{cr4, cr4_write, rdmsr, wrmsr, xsetbv},
 };
@@ -65,6 +70,7 @@ fn virtualize_core<Arch: Architecture>(registers: &Registers) -> ! {
             VmExitReason::Rdmsr(info) => handle_rdmsr(guest, &info),
             VmExitReason::Wrmsr(info) => handle_wrmsr(guest, &info),
             VmExitReason::XSetBv(info) => handle_xsetbv(guest, &info),
+            VmExitReason::VmCall(info) => handle_vmcall(guest, &info),
             VmExitReason::InitSignal | VmExitReason::StartupIpi | VmExitReason::NestedPageFault => {
             }
         }
@@ -154,6 +160,60 @@ fn handle_xsetbv<T: Guest>(guest: &mut T, info: &InstructionInfo) {
     guest.regs().rip = info.next_rip;
 }
 
+/// Handles the `VMCALL` / `VMMCALL` instruction.
+fn handle_vmcall<T: Guest>(guest: &mut T, info: &InstructionInfo) {
+    let hypercall = guest.regs().rax;
+    log::trace!("VMCALL {hypercall:#x?}");
+
+    let status = match hypercall {
+        HV_HYPERCALL_PING => {
+            guest.regs().rcx = HV_HYPERCALL_PING_RESPONSE;
+            HV_HYPERCALL_SUCCESS
+        }
+        HV_HYPERCALL_READ_MEMORY | HV_HYPERCALL_WRITE_MEMORY => {
+            handle_memory_hypercall(guest, hypercall)
+        }
+        _ => HV_HYPERCALL_INVALID,
+    };
+
+    guest.regs().rax = status;
+    guest.regs().rip = info.next_rip;
+}
+
+fn handle_memory_hypercall<T: Guest>(guest: &mut T, hypercall: u64) -> u64 {
+    let address = guest.regs().rcx;
+    let size = guest.regs().rdx as usize;
+    let buffer_va = guest.regs().r8;
+
+    if size == 0 || size > HV_MEM_IO_MAX_LEN {
+        return HV_HYPERCALL_INVALID_PARAMETER;
+    }
+    if !is_canonical_va(address) || !is_canonical_va(buffer_va) {
+        return HV_HYPERCALL_INVALID_PARAMETER;
+    }
+
+    let (src, dst) = if hypercall == HV_HYPERCALL_READ_MEMORY {
+        (address as *const u8, buffer_va as *mut u8)
+    } else {
+        (buffer_va as *const u8, address as *mut u8)
+    };
+
+    if src.is_null() || dst.is_null() {
+        return HV_HYPERCALL_INVALID_PARAMETER;
+    }
+
+    // SAFETY: The default host configuration shares guest page tables, so guest
+    // virtual addresses are directly accessible while handling the hypercall.
+    unsafe {
+        core::ptr::copy_nonoverlapping(src, dst, size);
+    }
+    HV_HYPERCALL_SUCCESS
+}
+
+fn is_canonical_va(address: u64) -> bool {
+    address <= 0x0000_7FFF_FFFF_FFFF || address >= 0xFFFF_8000_0000_0000
+}
+
 /// Represents a processor architecture that implements hardware-assisted virtualization.
 pub(crate) trait Architecture {
     type VirtualizationExtension: Extension;
@@ -193,6 +253,7 @@ pub(crate) enum VmExitReason {
     Rdmsr(InstructionInfo),
     Wrmsr(InstructionInfo),
     XSetBv(InstructionInfo),
+    VmCall(InstructionInfo),
     InitSignal,
     StartupIpi,
     NestedPageFault,

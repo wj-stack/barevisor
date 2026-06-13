@@ -3,8 +3,11 @@
 
 extern crate alloc;
 
+mod device;
 mod eprintln;
 mod ops;
+mod paging;
+mod process;
 
 use alloc::boxed::Box;
 use wdk_sys::{
@@ -15,7 +18,7 @@ use wdk_sys::{
 #[unsafe(link_section = "INIT")]
 #[unsafe(export_name = "DriverEntry")]
 extern "C" fn driver_entry(
-    _driver: &mut DRIVER_OBJECT,
+    driver: &mut DRIVER_OBJECT,
     _registry_path: PCUNICODE_STRING,
 ) -> NTSTATUS {
     const POOL_TAG: u32 = u32::from_ne_bytes(*b"Bare");
@@ -38,10 +41,22 @@ extern "C" fn driver_entry(
     // Register the platform specific API.
     hv::platform_ops::init(Box::new(ops::WindowsOps));
 
+    let status = device::create_device(driver);
+    if !wdk::nt_success(status) {
+        eprintln!("Device creation failed: {status}");
+        return status;
+    }
+
     // Virtualize the system. No `SharedHostData` is given, meaning that host's
     // IDT, GDT, TSS and page tables are all that of the system process (PID=4).
     // This makes the host debuggable with Windbg but also breakable from CPL0.
     hv::virtualize_system(hv::SharedHostData::default());
+
+    if hv::hypercall::ping() {
+        eprintln!("HV_HYPERCALL_PING succeeded");
+    } else {
+        eprintln!("HV_HYPERCALL_PING failed");
+    }
 
     eprintln!("Loaded win_hv.sys");
     STATUS_SUCCESS

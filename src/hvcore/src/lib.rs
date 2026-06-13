@@ -8,6 +8,7 @@ pub use hypervisor::SharedHostData;
 #[cfg(not(test))]
 pub use hypervisor::allocator;
 pub use hypervisor::gdt_tss::GdtTss;
+pub use hypervisor::hypercall;
 pub use hypervisor::interrupt_handlers::InterruptDescriptorTable;
 pub use hypervisor::paging_structures::PagingStructures;
 pub use hypervisor::panic::panic_impl;

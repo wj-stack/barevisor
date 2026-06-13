@@ -92,6 +92,7 @@ impl Guest for VmxGuest {
         const VMX_EXIT_REASON_RDMSR: u16 = 31;
         const VMX_EXIT_REASON_WRMSR: u16 = 32;
         const VMX_EXIT_REASON_XSETBV: u16 = 55;
+        const VMX_EXIT_REASON_VMCALL: u16 = 18;
 
         vmwrite(vmcs::guest::RIP, self.registers.rip);
         vmwrite(vmcs::guest::RSP, self.registers.rsp);
@@ -129,6 +130,9 @@ impl Guest for VmxGuest {
                 next_rip: self.registers.rip + vmread(vmcs::ro::VMEXIT_INSTRUCTION_LEN),
             }),
             VMX_EXIT_REASON_XSETBV => VmExitReason::XSetBv(InstructionInfo {
+                next_rip: self.registers.rip + vmread(vmcs::ro::VMEXIT_INSTRUCTION_LEN),
+            }),
+            VMX_EXIT_REASON_VMCALL => VmExitReason::VmCall(InstructionInfo {
                 next_rip: self.registers.rip + vmread(vmcs::ro::VMEXIT_INSTRUCTION_LEN),
             }),
             _ => {

@@ -7,11 +7,23 @@
 /// Verifies that Barevisor is handling hypercalls.
 pub const HV_HYPERCALL_PING: u64 = 0;
 
+/// Reads `size` bytes from guest virtual address `address` into guest buffer `buffer_va`.
+pub const HV_HYPERCALL_READ_MEMORY: u64 = 1;
+
+/// Writes `size` bytes from guest buffer `buffer_va` to guest virtual address `address`.
+pub const HV_HYPERCALL_WRITE_MEMORY: u64 = 2;
+
 /// Returned in RAX when a hypercall succeeds.
 pub const HV_HYPERCALL_SUCCESS: u64 = 0;
 
 /// Returned in RAX when the hypercall number is not recognized.
 pub const HV_HYPERCALL_INVALID: u64 = 1;
+
+/// Returned in RAX when hypercall arguments are invalid.
+pub const HV_HYPERCALL_INVALID_PARAMETER: u64 = 2;
+
+/// Maximum bytes transferred by a single read/write hypercall.
+pub const HV_MEM_IO_MAX_LEN: usize = 4096;
 
 /// Returned in RCX on success from [`HV_HYPERCALL_PING`].
 pub const HV_HYPERCALL_PING_RESPONSE: u64 = 0x4256_5248; // "BVRH"
@@ -68,4 +80,36 @@ pub fn issue(hypercall: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> (u64
 pub fn ping() -> bool {
     let (status, rcx, _, _) = issue(HV_HYPERCALL_PING, 0, 0, 0, 0);
     status == HV_HYPERCALL_SUCCESS && rcx == HV_HYPERCALL_PING_RESPONSE
+}
+
+/// Reads guest memory through the hypervisor.
+#[inline]
+pub fn read_memory(address: u64, buffer: *mut u8, size: usize) -> bool {
+    if size == 0 || size > HV_MEM_IO_MAX_LEN || buffer.is_null() {
+        return false;
+    }
+    let (status, _, _, _) = issue(
+        HV_HYPERCALL_READ_MEMORY,
+        address,
+        size as u64,
+        buffer as u64,
+        0,
+    );
+    status == HV_HYPERCALL_SUCCESS
+}
+
+/// Writes guest memory through the hypervisor.
+#[inline]
+pub fn write_memory(address: u64, buffer: *const u8, size: usize) -> bool {
+    if size == 0 || size > HV_MEM_IO_MAX_LEN || buffer.is_null() {
+        return false;
+    }
+    let (status, _, _, _) = issue(
+        HV_HYPERCALL_WRITE_MEMORY,
+        address,
+        size as u64,
+        buffer as u64,
+        0,
+    );
+    status == HV_HYPERCALL_SUCCESS
 }

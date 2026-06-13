@@ -87,6 +87,7 @@ impl Guest for SvmGuest {
         const VMEXIT_EXCEPTION_SX: u64 = 0x5e;
         const VMEXIT_CPUID: u64 = 0x72;
         const VMEXIT_NPF: u64 = 0x400;
+        const VMEXIT_VMMCALL: u64 = 0x81;
 
         self.vmcb.state_save_area.rax = self.registers.rax;
         self.vmcb.state_save_area.rip = self.registers.rip;
@@ -132,6 +133,9 @@ impl Guest for SvmGuest {
                 self.handle_nested_page_fault();
                 VmExitReason::NestedPageFault
             }
+            VMEXIT_VMMCALL => VmExitReason::VmCall(InstructionInfo {
+                next_rip: self.vmcb.control_area.nrip,
+            }),
             _ => {
                 log::error!("{:#x?}", self.vmcb);
                 panic!(
@@ -422,10 +426,12 @@ impl SvmGuest {
     fn initialize_control(&mut self) {
         const SVM_INTERCEPT_MISC1_CPUID: u32 = 1 << 18;
         const SVM_INTERCEPT_MISC2_VMRUN: u32 = 1 << 0;
+        const SVM_INTERCEPT_MISC2_VMMCALL: u32 = 1 << 1;
         const SVM_NP_ENABLE_NP_ENABLE: u64 = 1 << 0;
 
         self.vmcb.control_area.intercept_misc1 = SVM_INTERCEPT_MISC1_CPUID;
-        self.vmcb.control_area.intercept_misc2 = SVM_INTERCEPT_MISC2_VMRUN;
+        self.vmcb.control_area.intercept_misc2 =
+            SVM_INTERCEPT_MISC2_VMRUN | SVM_INTERCEPT_MISC2_VMMCALL;
         self.vmcb.control_area.pause_filter_count = u16::MAX;
 
         // Address Space Identifier (ASID) is useful when the given logical processor

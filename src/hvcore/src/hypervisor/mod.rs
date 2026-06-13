@@ -6,6 +6,7 @@ mod amd;
 mod apic_id;
 pub mod gdt_tss;
 mod host;
+pub mod hypercall;
 mod intel;
 pub mod interrupt_handlers;
 pub mod paging_structures;
