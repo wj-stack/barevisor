@@ -6,7 +6,7 @@ use shared_contract::{
     GetCr3ByPidRequest, GetCr3ByPidResponse, IOCTL_GET_CR3_BY_PID, IOCTL_PING,
     IOCTL_READ_GVA, IOCTL_READ_MEMORY, IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY, MEM_IO_MAX_LEN,
     MemIoRequest, PING_RESPONSE_U32, ReadGvaRequest, TranslateGvaRequest, TranslateGvaResponse,
-    TRANSLATE_FAIL_CR3,
+    TRANSLATE_FAIL_CR3, TRANSLATE_METHOD_CR3_SWITCH, TRANSLATE_METHOD_PAGE_WALK,
 };
 use wdk_sys::{
     CCHAR, DEVICE_OBJECT, DRIVER_OBJECT, IO_NO_INCREMENT, IRP, NTSTATUS,
@@ -200,18 +200,16 @@ fn handle_ioctl_get_cr3_by_pid(
             .cast::<GetCr3ByPidRequest>()
             .read_unaligned()
     };
-    let response = match crate::process::get_process_cr3(request.process_id) {
+    let response = match crate::process::get_kernel_cr3(request.process_id) {
         Ok(cr3) => GetCr3ByPidResponse {
             found: 1,
             _padding: [0; 7],
-            cr3: cr3.kernel,
-            user_cr3: cr3.user,
+            cr3,
         },
         Err(_) => GetCr3ByPidResponse {
             found: 0,
             _padding: [0; 7],
             cr3: 0,
-            user_cr3: 0,
         },
     };
 
@@ -223,16 +221,32 @@ fn handle_ioctl_get_cr3_by_pid(
     unsafe { complete_request(irp, STATUS_SUCCESS, size_of::<GetCr3ByPidResponse>()) }
 }
 
-fn translate_gva(process_id: u32, cr3: u64, gva: u64) -> TranslateGvaResponse {
-    let cr3 = match crate::process::resolve_cr3_for_gva(process_id, cr3, gva) {
+fn translate_gva(process_id: u32, method: u32, cr3: u64, gva: u64) -> TranslateGvaResponse {
+    let method = if method == TRANSLATE_METHOD_CR3_SWITCH {
+        TRANSLATE_METHOD_CR3_SWITCH
+    } else {
+        TRANSLATE_METHOD_PAGE_WALK
+    };
+
+    let cr3 = match crate::process::resolve_kernel_cr3(process_id, cr3) {
         Ok(cr3) => cr3,
         Err(status) => {
             eprintln!(
                 "translate_gva: cr3 resolve failed pid={process_id} gva={gva:#x} status={status}"
             );
-            return translate_gva_failed(0, status, TRANSLATE_FAIL_CR3, &crate::paging::WalkFailure::default());
+            return translate_gva_failed(
+                method,
+                0,
+                status,
+                TRANSLATE_FAIL_CR3,
+                &crate::paging::WalkFailure::default(),
+            );
         }
     };
+
+    if method == TRANSLATE_METHOD_CR3_SWITCH {
+        return translate_gva_cr3_switch(method, cr3, gva, process_id);
+    }
 
     match crate::paging::gva_to_gpa_walk(cr3, gva) {
         Ok(walk) => {
@@ -241,7 +255,7 @@ fn translate_gva(process_id: u32, cr3: u64, gva: u64) -> TranslateGvaResponse {
                 success: 1,
                 walk_level: walk.level as u8,
                 fail_stage: 0,
-                _padding: 0,
+                method: method as u8,
                 status: 0,
                 used_cr3: cr3,
                 pml4e_pa: walk.pml4e_pa,
@@ -258,12 +272,44 @@ fn translate_gva(process_id: u32, cr3: u64, gva: u64) -> TranslateGvaResponse {
                 failure.stage,
                 failure.status
             );
-            translate_gva_failed(cr3, failure.status, failure.stage, &failure)
+            translate_gva_failed(method, cr3, failure.status, failure.stage, &failure)
+        }
+    }
+}
+
+fn translate_gva_cr3_switch(
+    method: u32,
+    cr3: u64,
+    gva: u64,
+    process_id: u32,
+) -> TranslateGvaResponse {
+    match crate::paging::gva_to_gpa_cr3_switch(cr3, gva) {
+        Ok(gpa) => TranslateGvaResponse {
+            success: 1,
+            walk_level: 0,
+            fail_stage: 0,
+            method: method as u8,
+            status: 0,
+            used_cr3: cr3,
+            pml4e_pa: 0,
+            pdpe_pa: 0,
+            pde_pa: 0,
+            pte_pa: 0,
+            gpa,
+            hpa: crate::paging::gpa_to_hpa(gpa),
+        },
+        Err(status) => {
+            eprintln!(
+                "translate_gva: cr3-switch failed pid={process_id} gva={gva:#x} cr3={cr3:#x} status={status}"
+            );
+            let failure = crate::paging::cr3_switch_failure(status);
+            translate_gva_failed(method, cr3, failure.status, failure.stage, &failure)
         }
     }
 }
 
 fn translate_gva_failed(
+    method: u32,
     used_cr3: u64,
     status: NTSTATUS,
     fail_stage: u8,
@@ -273,7 +319,7 @@ fn translate_gva_failed(
         success: 0,
         walk_level: 0,
         fail_stage,
-        _padding: 0,
+        method: method as u8,
         status,
         used_cr3,
         pml4e_pa: failure.pml4e_pa,
@@ -306,7 +352,7 @@ fn handle_ioctl_translate_gva(
             .cast::<TranslateGvaRequest>()
             .read_unaligned()
     };
-    let response = translate_gva(request.process_id, request.cr3, request.gva);
+    let response = translate_gva(request.process_id, request.method, request.cr3, request.gva);
     unsafe {
         system_buffer
             .cast::<TranslateGvaResponse>()
@@ -337,7 +383,12 @@ fn handle_ioctl_read_gva(
         return unsafe { complete_request(irp, STATUS_BUFFER_TOO_SMALL, 0) };
     }
 
-    let translation = translate_gva(request.process_id, request.cr3, request.gva);
+    let translation = translate_gva(
+        request.process_id,
+        TRANSLATE_METHOD_PAGE_WALK,
+        request.cr3,
+        request.gva,
+    );
     if translation.success == 0 {
         return unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, 0) };
     }

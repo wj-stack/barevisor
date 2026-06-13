@@ -4,7 +4,7 @@
 #![no_std]
 
 /// Logical contract version (bump when IOCTL shapes change).
-pub const CONTRACT_VERSION: &str = "0.3.1";
+pub const CONTRACT_VERSION: &str = "0.4.0";
 
 /// `FILE_DEVICE_UNKNOWN` for `CTL_CODE`.
 pub const FILE_DEVICE_UNKNOWN: u32 = 0x0000_0022;
@@ -106,19 +106,23 @@ pub struct GetCr3ByPidResponse {
     pub _padding: [u8; 7],
     /// Kernel `DirectoryTableBase` from `KPROCESS`.
     pub cr3: u64,
-    /// User `UserDirectoryTableBase` from `KPROCESS` (KVA shadow).
-    pub user_cr3: u64,
 }
+
+/// Manual four-level page table walk via physical memory (`MmCopyMemory`).
+/// HyperDbg path 2.
+pub const TRANSLATE_METHOD_PAGE_WALK: u32 = 0;
+/// Switch to target kernel CR3 then `MmGetPhysicalAddress`. HyperDbg path 1.
+pub const TRANSLATE_METHOD_CR3_SWITCH: u32 = 1;
 
 /// Input for [`IOCTL_TRANSLATE_GVA`] and [`IOCTL_READ_GVA`].
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TranslateGvaRequest {
-    /// When non-zero, `cr3` is ignored and CR3 is resolved from this PID.
+    /// When non-zero, `cr3` is ignored and kernel CR3 is resolved from this PID.
     pub process_id: u32,
-    /// Reserved; must be zero.
-    pub _padding: u32,
-    /// Manual page table root when `process_id` is zero.
+    /// Translation method ([`TRANSLATE_METHOD_PAGE_WALK`] or [`TRANSLATE_METHOD_CR3_SWITCH`]).
+    pub method: u32,
+    /// Kernel page table root when `process_id` is zero.
     pub cr3: u64,
     /// Guest virtual address to translate.
     pub gva: u64,
@@ -136,6 +140,8 @@ pub const TRANSLATE_FAIL_PDPT: u8 = 4;
 pub const TRANSLATE_FAIL_PD: u8 = 5;
 /// PTE entry missing or physical mapping failed.
 pub const TRANSLATE_FAIL_PTE: u8 = 6;
+/// `MmGetPhysicalAddress` returned zero after CR3 switch.
+pub const TRANSLATE_FAIL_MMGPA: u8 = 7;
 
 /// Output for [`IOCTL_TRANSLATE_GVA`].
 #[repr(C)]
@@ -143,12 +149,12 @@ pub const TRANSLATE_FAIL_PTE: u8 = 6;
 pub struct TranslateGvaResponse {
     /// `1` when translation succeeded, otherwise `0`.
     pub success: u8,
-    /// Final page size on success: `4` = 4KB, `3` = 2MB, `2` = 1GB.
+    /// Final page size on success: `4` = 4KB, `3` = 2MB, `2` = 1GB; `0` for CR3-switch path.
     pub walk_level: u8,
     /// Failure stage when `success == 0` (see `TRANSLATE_FAIL_*`).
     pub fail_stage: u8,
-    /// Reserved; must be zero.
-    pub _padding: u8,
+    /// Method used ([`TRANSLATE_METHOD_PAGE_WALK`] or [`TRANSLATE_METHOD_CR3_SWITCH`]).
+    pub method: u8,
     /// `NTSTATUS` on failure; `0` on success.
     pub status: i32,
     /// CR3 value actually used for the walk.

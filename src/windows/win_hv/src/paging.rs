@@ -4,10 +4,13 @@ use core::ffi::c_void;
 use core::mem::size_of;
 
 use shared_contract::{
-    TRANSLATE_FAIL_INVALID, TRANSLATE_FAIL_PD, TRANSLATE_FAIL_PML4, TRANSLATE_FAIL_PDPT,
-    TRANSLATE_FAIL_PTE,
+    TRANSLATE_FAIL_INVALID, TRANSLATE_FAIL_MMGPA, TRANSLATE_FAIL_PD, TRANSLATE_FAIL_PML4,
+    TRANSLATE_FAIL_PDPT, TRANSLATE_FAIL_PTE,
 };
-use wdk_sys::{NTSTATUS, NT_SUCCESS};
+use wdk_sys::{
+    NTSTATUS, NT_SUCCESS,
+    ntddk::MmGetPhysicalAddress,
+};
 
 const PAGE_PRESENT: u64 = 1 << 0;
 const PAGE_LARGE: u64 = 1 << 7;
@@ -59,6 +62,42 @@ unsafe extern "system" {
         flags: u32,
         number_of_bytes_transferred: *mut usize,
     ) -> NTSTATUS;
+}
+
+/// Translates `gva` by switching to `kernel_cr3` and calling `MmGetPhysicalAddress`.
+///
+/// HyperDbg path 1 (`VirtualAddressToPhysicalAddressByProcessCr3`).
+pub(crate) fn gva_to_gpa_cr3_switch(kernel_cr3: u64, gva: u64) -> Result<u64, NTSTATUS> {
+    if !is_canonical_va(gva) {
+        return Err(wdk_sys::STATUS_INVALID_PARAMETER);
+    }
+    if kernel_cr3 & PAGE_MASK == 0 {
+        return Err(wdk_sys::STATUS_INVALID_PARAMETER);
+    }
+
+    let saved_cr3 = crate::process::read_cr3();
+    crate::process::write_cr3(kernel_cr3);
+    #[expect(clippy::cast_sign_loss)]
+    let gpa = unsafe { MmGetPhysicalAddress(gva as *mut c_void).QuadPart as u64 };
+    crate::process::write_cr3(saved_cr3);
+
+    if gpa == 0 {
+        return Err(wdk_sys::STATUS_NOT_FOUND);
+    }
+    Ok(gpa)
+}
+
+/// Maps a CR3-switch failure to walk failure metadata for IOCTL responses.
+pub(crate) fn cr3_switch_failure(status: NTSTATUS) -> WalkFailure {
+    WalkFailure {
+        status,
+        stage: if status == wdk_sys::STATUS_NOT_FOUND {
+            TRANSLATE_FAIL_MMGPA
+        } else {
+            TRANSLATE_FAIL_INVALID
+        },
+        ..WalkFailure::default()
+    }
 }
 
 /// Translates `gva` and returns the full walk details.
@@ -269,9 +308,4 @@ fn entry_pfn(entry: u64) -> u64 {
 
 fn is_canonical_va(address: u64) -> bool {
     address <= 0x0000_7FFF_FFFF_FFFF || address >= 0xFFFF_8000_0000_0000
-}
-
-/// Returns `true` when `gva` is in the user canonical range.
-pub(crate) fn is_user_gva(gva: u64) -> bool {
-    gva <= 0x0000_7FFF_FFFF_FFFF
 }

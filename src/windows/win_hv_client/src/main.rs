@@ -10,8 +10,9 @@ use shared_contract::{
     GetCr3ByPidRequest, GetCr3ByPidResponse, IOCTL_GET_CR3_BY_PID, IOCTL_PING, IOCTL_READ_GVA,
     IOCTL_READ_MEMORY, IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY, MEM_IO_MAX_LEN, MemIoRequest,
     PING_RESPONSE_U32, ReadGvaRequest, TranslateGvaRequest, TranslateGvaResponse,
-    TRANSLATE_FAIL_CR3, TRANSLATE_FAIL_INVALID, TRANSLATE_FAIL_PD, TRANSLATE_FAIL_PML4,
-    TRANSLATE_FAIL_PDPT, TRANSLATE_FAIL_PTE, USER_DEVICE_PATH,
+    TRANSLATE_FAIL_CR3, TRANSLATE_FAIL_INVALID, TRANSLATE_FAIL_MMGPA, TRANSLATE_FAIL_PD,
+    TRANSLATE_FAIL_PML4, TRANSLATE_FAIL_PDPT, TRANSLATE_FAIL_PTE, TRANSLATE_METHOD_CR3_SWITCH,
+    TRANSLATE_METHOD_PAGE_WALK, USER_DEVICE_PATH,
 };
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::Storage::FileSystem::{
@@ -67,7 +68,7 @@ enum Commands {
         #[arg(short, long, default_value_t = 16)]
         size: u32,
     },
-    /// Translate `gva` to GPA/HPA. Use `--pid` for user-mode addresses.
+    /// Translate `gva` to GPA/HPA using kernel CR3 only.
     Translate {
         /// Guest virtual address.
         address: String,
@@ -75,8 +76,11 @@ enum Commands {
         pid: Option<u32>,
         #[arg(long, conflicts_with = "pid")]
         cr3: Option<String>,
+        /// Translation method: `page-walk` (default) or `cr3-switch`.
+        #[arg(long, value_parser = parse_translate_method, default_value_t = TRANSLATE_METHOD_PAGE_WALK)]
+        method: u32,
     },
-    /// Read guest memory at `gva` after GVA->GPA->HPA translation. Use `--pid` for user-mode addresses.
+    /// Read guest memory at `gva` after GVA->GPA->HPA translation (page-walk, kernel CR3).
     ReadGva {
         /// Guest virtual address.
         address: String,
@@ -93,12 +97,22 @@ enum Commands {
         #[arg(short, long)]
         hex: String,
     },
-    /// Get CR3 (`DirectoryTableBase`) for a process ID.
+    /// Get kernel CR3 (`DirectoryTableBase`) for a process ID.
     Cr3 {
         pid: u32,
     },
-    /// List CR3 for all processes (enumerated in user mode).
+    /// List kernel CR3 for all processes (enumerated in user mode).
     ListCr3,
+}
+
+fn parse_translate_method(input: &str) -> Result<u32, String> {
+    match input {
+        "page-walk" | "walk" | "2" => Ok(TRANSLATE_METHOD_PAGE_WALK),
+        "cr3-switch" | "switch" | "1" => Ok(TRANSLATE_METHOD_CR3_SWITCH),
+        other => Err(format!(
+            "unknown method {other:?}; use page-walk or cr3-switch"
+        )),
+    }
 }
 
 fn parse_address(input: &str) -> anyhow::Result<u64> {
@@ -118,9 +132,12 @@ fn main() -> anyhow::Result<()> {
     let result = match cli.command {
         Commands::Ping => ping(&handle),
         Commands::Read { address, size } => read_memory(&handle, &address, size),
-        Commands::Translate { pid, cr3, address } => {
-            translate_gva_cmd(&handle, pid, cr3.as_deref(), &address)
-        }
+        Commands::Translate {
+            pid,
+            cr3,
+            address,
+            method,
+        } => translate_gva_cmd(&handle, pid, cr3.as_deref(), &address, method),
         Commands::ReadGva { pid, cr3, address, size } => {
             read_gva(&handle, pid, cr3.as_deref(), &address, size)
         }
@@ -210,6 +227,7 @@ fn translate_fail_stage_name(stage: u8) -> &'static str {
         TRANSLATE_FAIL_PDPT => "pdpt",
         TRANSLATE_FAIL_PD => "pd",
         TRANSLATE_FAIL_PTE => "pte",
+        TRANSLATE_FAIL_MMGPA => "mmgpa",
         _ => "unknown",
     }
 }
@@ -245,26 +263,19 @@ fn format_translate_failure(
     if response.pte_pa != 0 {
         message.push_str(&format!(" pte_pa={:#x}", response.pte_pa));
     }
-    if gva <= 0x0000_7FFF_FFFF_FFFF
-        && response.fail_stage == TRANSLATE_FAIL_PML4
-        && process_id == 0
-    {
-        message.push_str(
-            " hint: user-mode GVA needs user CR3; use --pid instead of kernel CR3 under KVA shadow",
-        );
-    }
     message
 }
 
 fn translate_gva_ioctl(
     h: &HANDLE,
     process_id: u32,
+    method: u32,
     cr3: u64,
     gva: u64,
 ) -> anyhow::Result<TranslateGvaResponse> {
     let request = TranslateGvaRequest {
         process_id,
-        _padding: 0,
+        method,
         cr3,
         gva,
     };
@@ -292,10 +303,19 @@ fn translate_gva_ioctl(
 }
 
 fn print_vtop_walk(gva: u64, translation: &TranslateGvaResponse) {
+    let method = match translation.method as u32 {
+        TRANSLATE_METHOD_CR3_SWITCH => "cr3-switch",
+        _ => "page-walk",
+    };
+    println!("method: {method}");
     let pagedir = translation.used_cr3 & 0x000F_FFFF_FFFF_F000;
     println!("Amd64VtoP: Virt {gva:016x}, pagedir {pagedir:016x}");
-    println!("Amd64VtoP: PML4E {:016x}", translation.pml4e_pa);
-    println!("Amd64VtoP: PDPE {:016x}", translation.pdpe_pa);
+    if translation.pml4e_pa != 0 {
+        println!("Amd64VtoP: PML4E {:016x}", translation.pml4e_pa);
+    }
+    if translation.pdpe_pa != 0 {
+        println!("Amd64VtoP: PDPE {:016x}", translation.pdpe_pa);
+    }
     if translation.pde_pa != 0 {
         println!("Amd64VtoP: PDE {:016x}", translation.pde_pa);
     }
@@ -317,10 +337,11 @@ fn translate_gva_cmd(
     pid: Option<u32>,
     cr3: Option<&str>,
     address: &str,
+    method: u32,
 ) -> anyhow::Result<()> {
     let (process_id, cr3) = resolve_gva_target(pid, cr3)?;
     let gva = parse_address(address)?;
-    let translation = translate_gva_ioctl(h, process_id, cr3, gva)?;
+    let translation = translate_gva_ioctl(h, process_id, method, cr3, gva)?;
     print_vtop_walk(gva, &translation);
     Ok(())
 }
@@ -407,9 +428,7 @@ fn write_memory(h: &HANDLE, address: &str, hex_data: &str) -> anyhow::Result<()>
 
 fn get_cr3(h: &HANDLE, pid: u32) -> anyhow::Result<()> {
     let process_cr3 = query_process_cr3(h, pid)?;
-    println!("pid {pid}:");
-    println!("  kernel_cr3 = {:#x}", process_cr3.cr3);
-    println!("  user_cr3   = {:#x}", process_cr3.user_cr3);
+    println!("pid {pid}: kernel_cr3 = {:#x}", process_cr3.cr3);
     Ok(())
 }
 
