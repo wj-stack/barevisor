@@ -77,7 +77,7 @@ enum Commands {
         #[arg(long, conflicts_with = "pid")]
         cr3: Option<String>,
         /// Translation method: `page-walk` (default) or `cr3-switch`.
-        #[arg(long, value_parser = parse_translate_method, default_value_t = TRANSLATE_METHOD_PAGE_WALK)]
+        #[arg(long, value_parser = parse_translate_method, default_value = "page-walk")]
         method: u32,
     },
     /// Read guest memory at `gva` after GVA->GPA->HPA translation (page-walk, kernel CR3).
@@ -107,7 +107,7 @@ enum Commands {
 
 fn parse_translate_method(input: &str) -> Result<u32, String> {
     match input {
-        "page-walk" | "walk" | "2" => Ok(TRANSLATE_METHOD_PAGE_WALK),
+        "page-walk" | "walk" | "0" | "2" => Ok(TRANSLATE_METHOD_PAGE_WALK),
         "cr3-switch" | "switch" | "1" => Ok(TRANSLATE_METHOD_CR3_SWITCH),
         other => Err(format!(
             "unknown method {other:?}; use page-walk or cr3-switch"
