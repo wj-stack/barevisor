@@ -6,6 +6,7 @@ use shared_contract::{
     GetCr3ByPidRequest, GetCr3ByPidResponse, IOCTL_GET_CR3_BY_PID, IOCTL_PING,
     IOCTL_READ_GVA, IOCTL_READ_MEMORY, IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY, MEM_IO_MAX_LEN,
     MemIoRequest, PING_RESPONSE_U32, ReadGvaRequest, TranslateGvaRequest, TranslateGvaResponse,
+    TRANSLATE_FAIL_CR3,
 };
 use wdk_sys::{
     CCHAR, DEVICE_OBJECT, DRIVER_OBJECT, IO_NO_INCREMENT, IRP, NTSTATUS,
@@ -199,16 +200,18 @@ fn handle_ioctl_get_cr3_by_pid(
             .cast::<GetCr3ByPidRequest>()
             .read_unaligned()
     };
-    let response = match crate::process::get_cr3_by_process_id(request.process_id) {
+    let response = match crate::process::get_process_cr3(request.process_id) {
         Ok(cr3) => GetCr3ByPidResponse {
             found: 1,
             _padding: [0; 7],
-            cr3,
+            cr3: cr3.kernel,
+            user_cr3: cr3.user,
         },
         Err(_) => GetCr3ByPidResponse {
             found: 0,
             _padding: [0; 7],
             cr3: 0,
+            user_cr3: 0,
         },
     };
 
@@ -220,23 +223,65 @@ fn handle_ioctl_get_cr3_by_pid(
     unsafe { complete_request(irp, STATUS_SUCCESS, size_of::<GetCr3ByPidResponse>()) }
 }
 
-fn translate_gva(cr3: u64, gva: u64) -> TranslateGvaResponse {
-    match crate::paging::gva_to_gpa(cr3, gva) {
-        Ok(gpa) => {
-            let hpa = crate::paging::gpa_to_hpa(gpa);
+fn translate_gva(process_id: u32, cr3: u64, gva: u64) -> TranslateGvaResponse {
+    let cr3 = match crate::process::resolve_cr3_for_gva(process_id, cr3, gva) {
+        Ok(cr3) => cr3,
+        Err(status) => {
+            eprintln!(
+                "translate_gva: cr3 resolve failed pid={process_id} gva={gva:#x} status={status}"
+            );
+            return translate_gva_failed(0, status, TRANSLATE_FAIL_CR3, &crate::paging::WalkFailure::default());
+        }
+    };
+
+    match crate::paging::gva_to_gpa_walk(cr3, gva) {
+        Ok(walk) => {
+            let gpa = walk.gpa;
             TranslateGvaResponse {
                 success: 1,
-                _padding: [0; 7],
+                walk_level: walk.level as u8,
+                fail_stage: 0,
+                _padding: 0,
+                status: 0,
+                used_cr3: cr3,
+                pml4e_pa: walk.pml4e_pa,
+                pdpe_pa: walk.pdpe_pa,
+                pde_pa: walk.pde_pa,
+                pte_pa: walk.pte_pa,
                 gpa,
-                hpa,
+                hpa: crate::paging::gpa_to_hpa(gpa),
             }
         }
-        Err(_) => TranslateGvaResponse {
-            success: 0,
-            _padding: [0; 7],
-            gpa: 0,
-            hpa: 0,
-        },
+        Err(failure) => {
+            eprintln!(
+                "translate_gva: walk failed pid={process_id} gva={gva:#x} cr3={cr3:#x} stage={} status={}",
+                failure.stage,
+                failure.status
+            );
+            translate_gva_failed(cr3, failure.status, failure.stage, &failure)
+        }
+    }
+}
+
+fn translate_gva_failed(
+    used_cr3: u64,
+    status: NTSTATUS,
+    fail_stage: u8,
+    failure: &crate::paging::WalkFailure,
+) -> TranslateGvaResponse {
+    TranslateGvaResponse {
+        success: 0,
+        walk_level: 0,
+        fail_stage,
+        _padding: 0,
+        status,
+        used_cr3,
+        pml4e_pa: failure.pml4e_pa,
+        pdpe_pa: failure.pdpe_pa,
+        pde_pa: failure.pde_pa,
+        pte_pa: failure.pte_pa,
+        gpa: 0,
+        hpa: 0,
     }
 }
 
@@ -261,7 +306,7 @@ fn handle_ioctl_translate_gva(
             .cast::<TranslateGvaRequest>()
             .read_unaligned()
     };
-    let response = translate_gva(request.cr3, request.gva);
+    let response = translate_gva(request.process_id, request.cr3, request.gva);
     unsafe {
         system_buffer
             .cast::<TranslateGvaResponse>()
@@ -292,7 +337,7 @@ fn handle_ioctl_read_gva(
         return unsafe { complete_request(irp, STATUS_BUFFER_TOO_SMALL, 0) };
     }
 
-    let translation = translate_gva(request.cr3, request.gva);
+    let translation = translate_gva(request.process_id, request.cr3, request.gva);
     if translation.success == 0 {
         return unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, 0) };
     }

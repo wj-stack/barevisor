@@ -4,7 +4,7 @@
 #![no_std]
 
 /// Logical contract version (bump when IOCTL shapes change).
-pub const CONTRACT_VERSION: &str = "0.2.0";
+pub const CONTRACT_VERSION: &str = "0.3.1";
 
 /// `FILE_DEVICE_UNKNOWN` for `CTL_CODE`.
 pub const FILE_DEVICE_UNKNOWN: u32 = 0x0000_0022;
@@ -104,19 +104,38 @@ pub struct GetCr3ByPidResponse {
     pub found: u8,
     /// Reserved; must be zero.
     pub _padding: [u8; 7],
-    /// `DirectoryTableBase` from the target `EPROCESS` (`KPROCESS`).
+    /// Kernel `DirectoryTableBase` from `KPROCESS`.
     pub cr3: u64,
+    /// User `UserDirectoryTableBase` from `KPROCESS` (KVA shadow).
+    pub user_cr3: u64,
 }
 
 /// Input for [`IOCTL_TRANSLATE_GVA`] and [`IOCTL_READ_GVA`].
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TranslateGvaRequest {
-    /// Guest page table root (`CR3` / `DirectoryTableBase`).
+    /// When non-zero, `cr3` is ignored and CR3 is resolved from this PID.
+    pub process_id: u32,
+    /// Reserved; must be zero.
+    pub _padding: u32,
+    /// Manual page table root when `process_id` is zero.
     pub cr3: u64,
     /// Guest virtual address to translate.
     pub gva: u64,
 }
+
+/// CR3 resolution failed (process lookup, attach, etc.).
+pub const TRANSLATE_FAIL_CR3: u8 = 1;
+/// Invalid GVA or page table root.
+pub const TRANSLATE_FAIL_INVALID: u8 = 2;
+/// PML4 entry missing or physical mapping failed.
+pub const TRANSLATE_FAIL_PML4: u8 = 3;
+/// PDPT entry missing or physical mapping failed.
+pub const TRANSLATE_FAIL_PDPT: u8 = 4;
+/// PD entry missing or physical mapping failed.
+pub const TRANSLATE_FAIL_PD: u8 = 5;
+/// PTE entry missing or physical mapping failed.
+pub const TRANSLATE_FAIL_PTE: u8 = 6;
 
 /// Output for [`IOCTL_TRANSLATE_GVA`].
 #[repr(C)]
@@ -124,8 +143,24 @@ pub struct TranslateGvaRequest {
 pub struct TranslateGvaResponse {
     /// `1` when translation succeeded, otherwise `0`.
     pub success: u8,
+    /// Final page size on success: `4` = 4KB, `3` = 2MB, `2` = 1GB.
+    pub walk_level: u8,
+    /// Failure stage when `success == 0` (see `TRANSLATE_FAIL_*`).
+    pub fail_stage: u8,
     /// Reserved; must be zero.
-    pub _padding: [u8; 7],
+    pub _padding: u8,
+    /// `NTSTATUS` on failure; `0` on success.
+    pub status: i32,
+    /// CR3 value actually used for the walk.
+    pub used_cr3: u64,
+    /// Physical address of the selected PML4 entry.
+    pub pml4e_pa: u64,
+    /// Physical address of the selected PDPT entry.
+    pub pdpe_pa: u64,
+    /// Physical address of the selected PD entry (`0` for 1GB pages).
+    pub pde_pa: u64,
+    /// Physical address of the selected PT entry (`0` for 1GB/2MB pages).
+    pub pte_pa: u64,
     /// Guest physical address.
     pub gpa: u64,
     /// Host physical address.
@@ -136,12 +171,12 @@ pub struct TranslateGvaResponse {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReadGvaRequest {
-    /// Guest page table root (`CR3` / `DirectoryTableBase`).
+    /// When non-zero, `cr3` is ignored and CR3 is resolved from this PID.
+    pub process_id: u32,
+    /// Number of bytes to read (must be `<=` [`MEM_IO_MAX_LEN`]).
+    pub size: u32,
+    /// Manual page table root when `process_id` is zero.
     pub cr3: u64,
     /// Guest virtual address to read.
     pub gva: u64,
-    /// Number of bytes to read (must be `<=` [`MEM_IO_MAX_LEN`]).
-    pub size: u32,
-    /// Reserved; must be zero.
-    pub _padding: u32,
 }

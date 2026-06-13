@@ -9,7 +9,9 @@ use clap::{Parser, Subcommand};
 use shared_contract::{
     GetCr3ByPidRequest, GetCr3ByPidResponse, IOCTL_GET_CR3_BY_PID, IOCTL_PING, IOCTL_READ_GVA,
     IOCTL_READ_MEMORY, IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY, MEM_IO_MAX_LEN, MemIoRequest,
-    PING_RESPONSE_U32, ReadGvaRequest, TranslateGvaRequest, TranslateGvaResponse, USER_DEVICE_PATH,
+    PING_RESPONSE_U32, ReadGvaRequest, TranslateGvaRequest, TranslateGvaResponse,
+    TRANSLATE_FAIL_CR3, TRANSLATE_FAIL_INVALID, TRANSLATE_FAIL_PD, TRANSLATE_FAIL_PML4,
+    TRANSLATE_FAIL_PDPT, TRANSLATE_FAIL_PTE, USER_DEVICE_PATH,
 };
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::Storage::FileSystem::{
@@ -65,15 +67,23 @@ enum Commands {
         #[arg(short, long, default_value_t = 16)]
         size: u32,
     },
-    /// Translate `gva` with `cr3` to GPA/HPA.
+    /// Translate `gva` to GPA/HPA. Use `--pid` for user-mode addresses.
     Translate {
-        cr3: String,
+        /// Guest virtual address.
         address: String,
+        #[arg(long, conflicts_with = "cr3")]
+        pid: Option<u32>,
+        #[arg(long, conflicts_with = "pid")]
+        cr3: Option<String>,
     },
-    /// Read guest memory at `gva` using `cr3` (GVA->GPA->HPA inside driver).
+    /// Read guest memory at `gva` after GVA->GPA->HPA translation. Use `--pid` for user-mode addresses.
     ReadGva {
-        cr3: String,
+        /// Guest virtual address.
         address: String,
+        #[arg(long, conflicts_with = "cr3")]
+        pid: Option<u32>,
+        #[arg(long, conflicts_with = "pid")]
+        cr3: Option<String>,
         #[arg(short, long, default_value_t = 16)]
         size: u32,
     },
@@ -108,8 +118,12 @@ fn main() -> anyhow::Result<()> {
     let result = match cli.command {
         Commands::Ping => ping(&handle),
         Commands::Read { address, size } => read_memory(&handle, &address, size),
-        Commands::Translate { cr3, address } => translate_gva_cmd(&handle, &cr3, &address),
-        Commands::ReadGva { cr3, address, size } => read_gva(&handle, &cr3, &address, size),
+        Commands::Translate { pid, cr3, address } => {
+            translate_gva_cmd(&handle, pid, cr3.as_deref(), &address)
+        }
+        Commands::ReadGva { pid, cr3, address, size } => {
+            read_gva(&handle, pid, cr3.as_deref(), &address, size)
+        }
         Commands::Write { address, hex } => write_memory(&handle, &address, &hex),
         Commands::Cr3 { pid } => get_cr3(&handle, pid),
         Commands::ListCr3 => list_cr3(&handle),
@@ -176,8 +190,84 @@ fn read_memory(h: &HANDLE, address: &str, size: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn translate_gva(h: &HANDLE, cr3: u64, gva: u64) -> anyhow::Result<TranslateGvaResponse> {
-    let request = TranslateGvaRequest { cr3, gva };
+fn resolve_gva_target(
+    pid: Option<u32>,
+    cr3: Option<&str>,
+) -> anyhow::Result<(u32, u64)> {
+    match (pid, cr3) {
+        (Some(pid), None) => Ok((pid, 0)),
+        (None, Some(cr3)) => Ok((0, parse_address(cr3)?)),
+        (Some(_), Some(_)) => bail!("use either --pid or CR3, not both"),
+        (None, None) => bail!("either --pid or CR3 is required"),
+    }
+}
+
+fn translate_fail_stage_name(stage: u8) -> &'static str {
+    match stage {
+        TRANSLATE_FAIL_CR3 => "cr3_resolve",
+        TRANSLATE_FAIL_INVALID => "invalid_gva_or_root",
+        TRANSLATE_FAIL_PML4 => "pml4",
+        TRANSLATE_FAIL_PDPT => "pdpt",
+        TRANSLATE_FAIL_PD => "pd",
+        TRANSLATE_FAIL_PTE => "pte",
+        _ => "unknown",
+    }
+}
+
+fn format_translate_failure(
+    gva: u64,
+    process_id: u32,
+    cr3: u64,
+    response: &TranslateGvaResponse,
+) -> String {
+    let mut message = format!(
+        "translation failed: gva={gva:#x} stage={} status={:#x}",
+        translate_fail_stage_name(response.fail_stage),
+        response.status as u32
+    );
+    if process_id != 0 {
+        message.push_str(&format!(" pid={process_id}"));
+    }
+    if response.used_cr3 != 0 {
+        message.push_str(&format!(" used_cr3={:#x}", response.used_cr3));
+    } else if cr3 != 0 {
+        message.push_str(&format!(" requested_cr3={cr3:#x}"));
+    }
+    if response.pml4e_pa != 0 {
+        message.push_str(&format!(" pml4e_pa={:#x}", response.pml4e_pa));
+    }
+    if response.pdpe_pa != 0 {
+        message.push_str(&format!(" pdpe_pa={:#x}", response.pdpe_pa));
+    }
+    if response.pde_pa != 0 {
+        message.push_str(&format!(" pde_pa={:#x}", response.pde_pa));
+    }
+    if response.pte_pa != 0 {
+        message.push_str(&format!(" pte_pa={:#x}", response.pte_pa));
+    }
+    if gva <= 0x0000_7FFF_FFFF_FFFF
+        && response.fail_stage == TRANSLATE_FAIL_PML4
+        && process_id == 0
+    {
+        message.push_str(
+            " hint: user-mode GVA needs user CR3; use --pid instead of kernel CR3 under KVA shadow",
+        );
+    }
+    message
+}
+
+fn translate_gva_ioctl(
+    h: &HANDLE,
+    process_id: u32,
+    cr3: u64,
+    gva: u64,
+) -> anyhow::Result<TranslateGvaResponse> {
+    let request = TranslateGvaRequest {
+        process_id,
+        _padding: 0,
+        cr3,
+        gva,
+    };
     let mut response = TranslateGvaResponse::default();
     let mut returned = 0u32;
     unsafe {
@@ -196,24 +286,53 @@ fn translate_gva(h: &HANDLE, cr3: u64, gva: u64) -> anyhow::Result<TranslateGvaR
         bail!("IOCTL_TRANSLATE_GVA returned {returned} bytes");
     }
     if response.success == 0 {
-        bail!("failed to translate gva {gva:#x} with cr3 {cr3:#x}");
+        bail!(format_translate_failure(gva, process_id, cr3, &response));
     }
     Ok(response)
 }
 
-fn translate_gva_cmd(h: &HANDLE, cr3: &str, address: &str) -> anyhow::Result<()> {
-    let cr3 = parse_address(cr3)?;
-    let gva = parse_address(address)?;
-    let translation = translate_gva(h, cr3, gva)?;
+fn print_vtop_walk(gva: u64, translation: &TranslateGvaResponse) {
+    let pagedir = translation.used_cr3 & 0x000F_FFFF_FFFF_F000;
+    println!("Amd64VtoP: Virt {gva:016x}, pagedir {pagedir:016x}");
+    println!("Amd64VtoP: PML4E {:016x}", translation.pml4e_pa);
+    println!("Amd64VtoP: PDPE {:016x}", translation.pdpe_pa);
+    if translation.pde_pa != 0 {
+        println!("Amd64VtoP: PDE {:016x}", translation.pde_pa);
+    }
+    if translation.pte_pa != 0 {
+        println!("Amd64VtoP: PTE {:016x}", translation.pte_pa);
+    }
+    println!("Amd64VtoP: Mapped phys {:016x}", translation.gpa);
     println!(
-        "gva {gva:#x} -> gpa {:#x} -> hpa {:#x}",
-        translation.gpa, translation.hpa
+        "Virtual address {gva:x} translates to physical address {:x}.",
+        translation.gpa
     );
+    if translation.hpa != translation.gpa {
+        println!("Host physical address: {:x}", translation.hpa);
+    }
+}
+
+fn translate_gva_cmd(
+    h: &HANDLE,
+    pid: Option<u32>,
+    cr3: Option<&str>,
+    address: &str,
+) -> anyhow::Result<()> {
+    let (process_id, cr3) = resolve_gva_target(pid, cr3)?;
+    let gva = parse_address(address)?;
+    let translation = translate_gva_ioctl(h, process_id, cr3, gva)?;
+    print_vtop_walk(gva, &translation);
     Ok(())
 }
 
-fn read_gva(h: &HANDLE, cr3: &str, address: &str, size: u32) -> anyhow::Result<()> {
-    let cr3 = parse_address(cr3)?;
+fn read_gva(
+    h: &HANDLE,
+    pid: Option<u32>,
+    cr3: Option<&str>,
+    address: &str,
+    size: u32,
+) -> anyhow::Result<()> {
+    let (process_id, cr3) = resolve_gva_target(pid, cr3)?;
     let gva = parse_address(address)?;
     let size = size as usize;
     if size == 0 || size > MEM_IO_MAX_LEN {
@@ -221,10 +340,10 @@ fn read_gva(h: &HANDLE, cr3: &str, address: &str, size: u32) -> anyhow::Result<(
     }
 
     let request = ReadGvaRequest {
+        process_id,
+        size: size as u32,
         cr3,
         gva,
-        size: size as u32,
-        _padding: 0,
     };
     let mut buffer = vec![0u8; size];
     let mut returned = 0u32;
@@ -243,7 +362,7 @@ fn read_gva(h: &HANDLE, cr3: &str, address: &str, size: u32) -> anyhow::Result<(
     if returned as usize != size {
         bail!("IOCTL_READ_GVA returned {returned} bytes, expected {size}");
     }
-    println!("read {size} bytes from gva {gva:#x} (cr3 {cr3:#x}):");
+    println!("read {size} bytes:");
     println!("{}", hex::encode(&buffer));
     Ok(())
 }
@@ -287,12 +406,14 @@ fn write_memory(h: &HANDLE, address: &str, hex_data: &str) -> anyhow::Result<()>
 }
 
 fn get_cr3(h: &HANDLE, pid: u32) -> anyhow::Result<()> {
-    let cr3 = query_cr3(h, pid)?;
-    println!("pid {pid}: cr3 = {cr3:#x}");
+    let process_cr3 = query_process_cr3(h, pid)?;
+    println!("pid {pid}:");
+    println!("  kernel_cr3 = {:#x}", process_cr3.cr3);
+    println!("  user_cr3   = {:#x}", process_cr3.user_cr3);
     Ok(())
 }
 
-fn query_cr3(h: &HANDLE, pid: u32) -> anyhow::Result<u64> {
+fn query_process_cr3(h: &HANDLE, pid: u32) -> anyhow::Result<GetCr3ByPidResponse> {
     let request = GetCr3ByPidRequest { process_id: pid };
     let mut response = GetCr3ByPidResponse::default();
     let mut returned = 0u32;
@@ -314,7 +435,11 @@ fn query_cr3(h: &HANDLE, pid: u32) -> anyhow::Result<u64> {
     if response.found == 0 {
         bail!("process {pid} not found");
     }
-    Ok(response.cr3)
+    Ok(response)
+}
+
+fn query_cr3(h: &HANDLE, pid: u32) -> anyhow::Result<u64> {
+    Ok(query_process_cr3(h, pid)?.cr3)
 }
 
 fn list_cr3(h: &HANDLE) -> anyhow::Result<()> {
