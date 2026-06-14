@@ -202,7 +202,6 @@ exit_vmx_to_guest:
     mov     r12, rcx
     call    devirt_guest_rsp
     mov     rsp, rax
-    mov     rax, [r12 + registers_rax]
     mov     rbx, [r12 + registers_rbx]
     mov     rcx, [r12 + registers_rcx]
     mov     rdx, [r12 + registers_rdx]
@@ -216,7 +215,17 @@ exit_vmx_to_guest:
     mov     r13, [r12 + registers_r13]
     mov     r14, [r12 + registers_r14]
     mov     r15, [r12 + registers_r15]
-    mov     r12, [r12 + registers_r12]
+    mov     rax, [r12 + registers_rflags]
+    mov     rdx, [r12 + registers_r12]
+    and     rax, ~0x200
+    pushfq
+    pop     rcx
+    and     rcx, 0x200
+    or      rcx, rax
+    push    rcx
+    popfq
+    mov     r12, rdx
     call    devirt_guest_rip
     push    rax
+    xor     rax, rax
     ret

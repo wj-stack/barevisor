@@ -9,8 +9,9 @@ use x86::{dtables::DescriptorTablePointer, vmx::vmcs};
 
 use crate::hypervisor::{
     apic_id::{self, PROCESSOR_COUNT},
+    host_uses_custom_tables,
     hypercall::HV_HYPERCALL_SUCCESS,
-    x86_instructions::{cr3_write, cr4_write, lgdt, lidt, wrmsr},
+    x86_instructions::{cr3_write, cr4, cr4_write, lgdt, lidt, wrmsr},
 };
 
 use super::guest::VmxGuest;
@@ -91,13 +92,33 @@ fn vmread_u16(field: u32) -> u16 {
     vmread_u64(field) as u16
 }
 
-/// Port of HyperDbg `HvRestoreRegisters` — before VMXOFF.
-pub(crate) fn hv_restore_registers() {
-    devirt_log("restore: FS/GS base MSRs");
-    wrmsr(x86::msr::IA32_FS_BASE, vmread_u64(vmcs::guest::FS_BASE));
-    wrmsr(x86::msr::IA32_GS_BASE, vmread_u64(vmcs::guest::GS_BASE));
+/// Restores FS/GS MSRs before VMXOFF (HyperDbg `HvRestoreRegisters` MSR portion).
+///
+/// Uses VMCS **guest** fields: after VM-exit `rdmsr` reflects host MSRs loaded by
+/// hardware, not the guest values needed for native return past `VMCALL`.
+/// `IA32_KERNEL_GS_BASE` is not reloaded on VM-exit; HyperDbg leaves it unchanged.
+fn hv_restore_msr_bases() {
+    let fs_base = vmread_u64(vmcs::guest::FS_BASE);
+    let gs_base = vmread_u64(vmcs::guest::GS_BASE);
+    devirt_log_ctx("restore: FS/GS from VMCS guest", gs_base, fs_base, 0, 0);
+    wrmsr(x86::msr::IA32_FS_BASE, fs_base);
+    wrmsr(x86::msr::IA32_GS_BASE, gs_base);
+}
 
-    devirt_log("restore: GDTR");
+/// Port of HyperDbg `HvRestoreRegisters` — before VMXOFF.
+///
+/// With the default `SharedHostData` (shared IDT/GDT), VM-exit already left the
+/// CPU on the correct host descriptor tables; reloading stale VMCS guest fields
+/// can corrupt the live IDT/GDT.
+pub(crate) fn hv_restore_registers() {
+    hv_restore_msr_bases();
+
+    if !host_uses_custom_tables() {
+        devirt_log("restore: skip GDT/IDT/segments (shared host tables)");
+        return;
+    }
+
+    devirt_log("restore: GDTR (custom host tables)");
     let gdtr = DescriptorTablePointer::<u64> {
         limit: vmread_u64(vmcs::guest::GDTR_LIMIT) as u16,
         base: vmread_u64(vmcs::guest::GDTR_BASE) as *const u64,
@@ -146,6 +167,7 @@ pub(crate) fn perform_vmxoff(guest: &mut VmxGuest) -> ! {
     // INVEPT/VMX instructions trap from guest; run EPT teardown in VMX root.
     devirt_prepare_ept();
 
+    // HyperDbg / SimpleVisor: guest must resume with its own address space.
     let guest_cr3 = vmread_u64(vmcs::guest::CR3);
     cr3_write(guest_cr3);
     devirt_log_ctx("guest CR3 loaded", 0, 0, guest_cr3, 0);
@@ -171,18 +193,28 @@ pub(crate) fn perform_vmxoff(guest: &mut VmxGuest) -> ! {
     devirt_log("hv_restore_registers");
     hv_restore_registers();
 
-    let regs_ptr = guest.regs_mut() as *mut _ as *mut u8;
+    let regs = guest.regs_mut();
+    // VM-exit leaves host RFLAGS (typically IF=0); native return must match guest VMCS.
+    const RFLAGS_IF: u64 = 1 << 9;
+    regs.rflags = vmread_u64(vmcs::guest::RFLAGS) & !RFLAGS_IF;
+
+    let regs_ptr = regs as *mut _ as *mut u8;
     devirt_log("restore_guest_xmm_regs");
     unsafe { restore_guest_xmm_regs(regs_ptr) };
-
-    // VMREAD is illegal after VMXOFF — capture guest CR4 while the VMCS is still valid.
-    let guest_cr4 = vmread_u64(vmcs::guest::CR4);
 
     devirt_log("VMCLEAR + VMXOFF");
     guest.vmclear_and_vmxoff();
 
-    cr4_write(Cr4::from_bits_truncate(guest_cr4 as usize) & !Cr4::CR4_ENABLE_VMX);
-    devirt_log_ctx("CR4.VMXE cleared", guest_rip, guest_rsp, guest_cr3, guest_cr4);
+    // HyperDbg: clear VMXE on the live CR4, not a stale VMCS guest snapshot.
+    let native_cr4 = cr4();
+    cr4_write(native_cr4 & !Cr4::CR4_ENABLE_VMX);
+    devirt_log_ctx(
+        "CR4.VMXE cleared",
+        guest_rip,
+        guest_rsp,
+        guest_cr3,
+        native_cr4.bits() as u64,
+    );
 
     guest.regs_mut().rax = HV_HYPERCALL_SUCCESS;
 

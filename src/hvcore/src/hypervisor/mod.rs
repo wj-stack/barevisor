@@ -126,6 +126,13 @@ pub(crate) fn devirt_in_progress() -> bool {
     DEVIRT_IN_PROGRESS.load(Ordering::SeqCst)
 }
 
+/// True when the host uses custom page tables or descriptor tables (UEFI path).
+pub(crate) fn host_uses_custom_tables() -> bool {
+    SHARED_HOST_DATA.get().is_some_and(|host| {
+        host.pt.is_some() || host.idt.is_some() || host.gdts.is_some()
+    })
+}
+
 const HV_CPUID_VENDOR_AND_MAX_FUNCTIONS: u32 = 0x4000_0000;
 const HV_CPUID_INTERFACE: u32 = 0x4000_0001;
 const OUR_HV_VENDOR_NAME_EBX: u32 = u32::from_ne_bytes(*b"Bare");
