@@ -163,9 +163,22 @@ impl Guest for VmxGuest {
     fn regs(&mut self) -> &mut Registers {
         &mut self.registers
     }
+
+    fn devirtualize(&mut self) -> ! {
+        super::devirt::perform_vmxoff(self)
+    }
 }
 
 impl VmxGuest {
+    pub(crate) fn regs_mut(&mut self) -> &mut Registers {
+        &mut self.registers
+    }
+
+    pub(crate) fn vmclear_and_vmxoff(&mut self) {
+        vmclear(&mut self.vmcs);
+        unsafe { x86::bits64::vmx::vmxoff().unwrap() };
+    }
+
     /// Initializes the control fields of the VMCS.
     fn initialize_control(&self) {
         // - Set HOST_ADDRESS_SPACE_SIZE to run the host on the 64bit mode.
@@ -660,6 +673,13 @@ struct SharedGuestData {
 
 pub(crate) fn ept_state() -> &'static spin::Mutex<EptState> {
     &SHARED_GUEST_DATA.ept
+}
+
+pub(crate) fn reset_shared_guest_state() {
+    crate::hv_dbg!("devirt: reset_shared_guest_state (EPT + devirt flags)");
+    super::devirt::reset_devirt_prepare_state();
+    SHARED_GUEST_DATA.ept.lock().reset();
+    crate::hv_dbg!("devirt: reset_shared_guest_state done");
 }
 
 pub(crate) fn vmcs_exit_qualification() -> u64 {

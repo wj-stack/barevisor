@@ -16,4 +16,8 @@ impl Extension for Svm {
         // See: 15.4 Enabling SVM
         wrmsr(x86::msr::IA32_EFER, rdmsr(x86::msr::IA32_EFER) | EFER_SVME);
     }
+
+    fn disable(&mut self) {
+        panic!("AMD devirtualize not implemented");
+    }
 }

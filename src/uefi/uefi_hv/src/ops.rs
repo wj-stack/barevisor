@@ -21,6 +21,10 @@ impl PlatformOps for UefiOps {
         }
     }
 
+    fn broadcast_on_all_processors(&self, callback: fn()) {
+        self.run_on_all_processors(callback);
+    }
+
     fn pa(&self, va: *const c_void) -> u64 {
         va as _
     }

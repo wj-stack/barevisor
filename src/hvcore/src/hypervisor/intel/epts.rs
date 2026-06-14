@@ -37,6 +37,10 @@ impl EptState {
         state
     }
 
+    pub(crate) fn reset(&mut self) {
+        *self = Self::new();
+    }
+
     /// Splits 2 MB regions that straddle MTRR boundaries at hypervisor init.
     ///
     /// Identity map uses 2 MB large pages where valid; Intel requires 4 KB leaf
@@ -297,6 +301,28 @@ impl Epts {
         eptp.set_memory_type(MemoryType::WriteBack as _);
         eptp.set_page_levels_minus_one(3);
         eptp
+    }
+}
+
+/// Invalidates all EPT-derived guest physical address translations.
+pub(crate) fn invept_all_contexts() {
+    let descriptor = [0u64, 0u64];
+    unsafe {
+        #[cfg(target_env = "msvc")]
+        core::arch::asm!(
+            "invept rcx, [{desc}]",
+            desc = in(reg) descriptor.as_ptr(),
+            in("rcx") 2u64,
+            options(nostack),
+        );
+
+        #[cfg(not(target_env = "msvc"))]
+        core::arch::asm!(
+            "invept ({desc}), {ty}",
+            desc = in(reg) descriptor.as_ptr(),
+            ty = in(reg) 2u64,
+            options(nostack),
+        );
     }
 }
 

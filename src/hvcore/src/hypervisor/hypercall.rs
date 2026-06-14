@@ -22,6 +22,9 @@ pub const HV_HYPERCALL_UNINSTALL_EPT_HOOK2: u64 = 4;
 /// Restores the default installed hook view after a hooked syscall returns (RCX=GPA page base).
 pub const HV_HYPERCALL_RESTORE_EPT_HOOK2: u64 = 5;
 
+/// Turns off VMX on the current logical processor (only honored during `devirtualize_system`).
+pub const HV_HYPERCALL_VMXOFF: u64 = 6;
+
 /// Returned in RAX when a hypercall succeeds.
 pub const HV_HYPERCALL_SUCCESS: u64 = 0;
 
@@ -147,5 +150,12 @@ pub fn uninstall_ept_hook2(gpa_page_base: u64) -> bool {
 #[inline]
 pub fn restore_ept_hook2(gpa_page_base: u64) -> bool {
     let (status, _, _, _) = issue(HV_HYPERCALL_RESTORE_EPT_HOOK2, gpa_page_base, 0, 0, 0);
+    status == HV_HYPERCALL_SUCCESS
+}
+
+/// Requests VMXOFF on the current logical processor via VMCALL.
+#[inline]
+pub fn vmxoff() -> bool {
+    let (status, _, _, _) = issue(HV_HYPERCALL_VMXOFF, 0, 0, 0, 0);
     status == HV_HYPERCALL_SUCCESS
 }

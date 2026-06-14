@@ -21,6 +21,7 @@ mod switch_stack;
 mod x86_instructions;
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Once;
 use x86::cpuid::cpuid;
 
@@ -63,6 +64,44 @@ pub fn virtualize_system(shared_host: SharedHostData) {
     log::info!("Virtualized the all processors");
 }
 
+/// Exits virtualization on all logical processors.
+pub fn devirtualize_system() {
+    serial_logger::init(log::LevelFilter::Info);
+    if !is_our_hypervisor_present() {
+        log::info!("devirtualize_system: not virtualized, skipping");
+        return;
+    }
+
+    log::info!("devirtualize_system: DEVIRT_IN_PROGRESS=true, broadcasting VMXOFF");
+    DEVIRT_IN_PROGRESS.store(true, Ordering::SeqCst);
+
+    platform_ops::get().broadcast_on_all_processors(devirt_per_cpu_vmxoff);
+
+    log::info!("devirtualize_system: broadcast returned, resetting shared state");
+    intel::guest::reset_shared_guest_state();
+    DEVIRT_IN_PROGRESS.store(false, Ordering::SeqCst);
+    log::info!("Devirtualized the all processors");
+}
+
+fn devirt_per_cpu_vmxoff() {
+    let apic = apic_id::get();
+    let proc_id = apic_id::processor_id_from(apic).unwrap_or(usize::MAX);
+    crate::hv_dbg!(
+        "devirt: cpu {proc_id} apic {apic:#x}: HV_HYPERCALL_VMXOFF begin"
+    );
+
+    let ok = hypercall::vmxoff();
+
+    crate::hv_dbg!(
+        "devirt: cpu {proc_id} apic {apic:#x}: HV_HYPERCALL_VMXOFF end ok={ok}"
+    );
+    if !ok {
+        log::error!(
+            "devirt: cpu {proc_id} apic {apic:#x}: HV_HYPERCALL_VMXOFF failed"
+        );
+    }
+}
+
 /// A collection of data that the host depends on for its entire lifespan.
 #[derive(Debug, Default)]
 pub struct SharedHostData {
@@ -80,6 +119,12 @@ pub struct SharedHostData {
 }
 
 static SHARED_HOST_DATA: Once<SharedHostData> = Once::new();
+
+static DEVIRT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn devirt_in_progress() -> bool {
+    DEVIRT_IN_PROGRESS.load(Ordering::SeqCst)
+}
 
 const HV_CPUID_VENDOR_AND_MAX_FUNCTIONS: u32 = 0x4000_0000;
 const HV_CPUID_INTERFACE: u32 = 0x4000_0001;

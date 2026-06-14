@@ -27,8 +27,10 @@ pub(crate) struct Registers {
     pub(crate) xmm3: Xmm,
     pub(crate) xmm4: Xmm,
     pub(crate) xmm5: Xmm,
+    pub(crate) mxcsr: u32,
+    _mxcsr_padding: [u32; 3],
 }
-const _: () = assert!(core::mem::size_of::<Registers>() == 0xf0);
+const _: () = assert!(core::mem::size_of::<Registers>() == 0x100);
 
 impl Registers {
     #[inline(always)]

@@ -65,6 +65,23 @@ impl HookTable {
             .ok_or(HookError::NotFound)?;
         slot.take().ok_or(HookError::NotFound)
     }
+
+    fn hooked_gpas(&self) -> alloc::vec::Vec<u64> {
+        self.entries
+            .iter()
+            .filter_map(|entry| entry.map(|h| h.gpa_page_base))
+            .collect()
+    }
+
+    fn clear(&mut self) {
+        self.entries = [None; MAX_HOOKS];
+    }
+
+    fn take_all(&mut self) -> alloc::vec::Vec<EptHookedPage> {
+        let hooks: alloc::vec::Vec<_> = self.entries.iter().filter_map(|e| *e).collect();
+        self.clear();
+        hooks
+    }
 }
 
 static HOOKS: Mutex<HookTable> = Mutex::new(HookTable::new());
@@ -171,6 +188,21 @@ pub(crate) fn uninstall(ept: &mut EptState, gpa_page_base: u64) -> Result<(), Ho
     entry.restore_pte(hook.orig_pte);
     invept_single_context(ept.eptp());
     Ok(())
+}
+
+/// Removes every installed hook and restores original EPT mappings.
+pub(crate) fn uninstall_all() {
+    let hooks = HOOKS.lock().take_all();
+    if hooks.is_empty() {
+        return;
+    }
+    let mut ept = super::guest::ept_state().lock();
+    for hook in hooks {
+        if let Ok(entry) = ept.pml1_entry_mut(hook.gpa_page_base) {
+            entry.restore_pte(hook.orig_pte);
+        }
+    }
+    invept_single_context(ept.eptp());
 }
 
 pub(crate) fn handle_ept_violation(

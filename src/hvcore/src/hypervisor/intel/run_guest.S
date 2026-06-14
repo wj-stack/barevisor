@@ -69,6 +69,7 @@ run_vmx_guest:
     movaps  xmm3, [r15 + registers_xmm3]
     movaps  xmm4, [r15 + registers_xmm4]
     movaps  xmm5, [r15 + registers_xmm5]
+    ldmxcsr dword ptr [r15 + registers_mxcsr]
     mov     rax, [r15 + registers_rax]
     mov     rbx, [r15 + registers_rbx]
     mov     rcx, [r15 + registers_rcx]
@@ -144,6 +145,7 @@ run_vmx_guest:
     movaps  [r15 + registers_xmm3], xmm3
     movaps  [r15 + registers_xmm4], xmm4
     movaps  [r15 + registers_xmm5], xmm5
+    stmxcsr dword ptr [r15 + registers_mxcsr]
 
 .Exit:
     # Discard the stack value pushed at #1.
@@ -176,4 +178,45 @@ run_vmx_guest:
     pop     rbx
     pop     rdx
     pop     rcx
+    ret
+
+# Restores XMM0-5 from a `Registers` struct (Windows only).
+.global restore_guest_xmm_regs
+restore_guest_xmm_regs:
+    # rcx -> &Registers
+    movaps  xmm0, [rcx + registers_xmm0]
+    movaps  xmm1, [rcx + registers_xmm1]
+    movaps  xmm2, [rcx + registers_xmm2]
+    movaps  xmm3, [rcx + registers_xmm3]
+    movaps  xmm4, [rcx + registers_xmm4]
+    movaps  xmm5, [rcx + registers_xmm5]
+    ldmxcsr dword ptr [rcx + registers_mxcsr]
+    ret
+
+.extern devirt_guest_rsp
+.extern devirt_guest_rip
+
+# Jumps to guest after VMXOFF with GPRs from `Registers` (rcx).
+.global exit_vmx_to_guest
+exit_vmx_to_guest:
+    mov     r12, rcx
+    call    devirt_guest_rsp
+    mov     rsp, rax
+    mov     rax, [r12 + registers_rax]
+    mov     rbx, [r12 + registers_rbx]
+    mov     rcx, [r12 + registers_rcx]
+    mov     rdx, [r12 + registers_rdx]
+    mov     rdi, [r12 + registers_rdi]
+    mov     rsi, [r12 + registers_rsi]
+    mov     rbp, [r12 + registers_rbp]
+    mov      r8, [r12 + registers_r8]
+    mov      r9, [r12 + registers_r9]
+    mov     r10, [r12 + registers_r10]
+    mov     r11, [r12 + registers_r11]
+    mov     r13, [r12 + registers_r13]
+    mov     r14, [r12 + registers_r14]
+    mov     r15, [r12 + registers_r15]
+    mov     r12, [r12 + registers_r12]
+    call    devirt_guest_rip
+    push    rax
     ret

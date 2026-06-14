@@ -8,11 +8,12 @@ use x86::{
 use crate::hypervisor::{
     HV_CPUID_INTERFACE, HV_CPUID_VENDOR_AND_MAX_FUNCTIONS, OUR_HV_VENDOR_NAME_EBX,
     OUR_HV_VENDOR_NAME_ECX, OUR_HV_VENDOR_NAME_EDX, apic_id,
+    devirt_in_progress,
     hypercall::{
         HV_HYPERCALL_INSTALL_EPT_HOOK2, HV_HYPERCALL_INVALID, HV_HYPERCALL_INVALID_PARAMETER,
         HV_HYPERCALL_PING, HV_HYPERCALL_PING_RESPONSE, HV_HYPERCALL_READ_MEMORY,
         HV_HYPERCALL_RESTORE_EPT_HOOK2, HV_HYPERCALL_SUCCESS, HV_HYPERCALL_UNINSTALL_EPT_HOOK2,
-        HV_HYPERCALL_WRITE_MEMORY,
+        HV_HYPERCALL_VMXOFF, HV_HYPERCALL_WRITE_MEMORY,
         HV_MEM_IO_MAX_LEN,
     },
     registers::Registers,
@@ -224,6 +225,22 @@ fn handle_vmcall<T: Guest>(guest: &mut T, info: &InstructionInfo) {
     let hypercall = guest.regs().rax;
     log::trace!("VMCALL {hypercall:#x?}");
 
+    if hypercall == HV_HYPERCALL_VMXOFF {
+        if !devirt_in_progress() {
+            crate::hv_dbg!("devirt: VMXOFF hypercall rejected (devirt not in progress)");
+            guest.regs().rax = HV_HYPERCALL_INVALID;
+            guest.regs().rip = info.next_rip;
+            return;
+        }
+        let guest_rip = guest.regs().rip;
+        let guest_rsp = guest.regs().rsp;
+        crate::hv_dbg!(
+            "devirt: VMXOFF hypercall accepted rip={guest_rip:#x} rsp={guest_rsp:#x}"
+        );
+        guest.regs().rax = HV_HYPERCALL_SUCCESS;
+        guest.devirtualize();
+    }
+
     let status = match hypercall {
         HV_HYPERCALL_PING => {
             guest.regs().rcx = HV_HYPERCALL_PING_RESPONSE;
@@ -345,6 +362,9 @@ pub(crate) trait Architecture {
 pub(crate) trait Extension: Default {
     /// Enables the hardware-assisted virtualization extension.
     fn enable(&mut self);
+
+    /// Disables the hardware-assisted virtualization extension.
+    fn disable(&mut self);
 }
 
 /// Represents an implementation of a guest.
@@ -366,6 +386,11 @@ pub(crate) trait Guest {
 
     /// Gets a reference to some of guest registers.
     fn regs(&mut self) -> &mut Registers;
+
+    /// Exits virtualization on this processor. Does not return.
+    fn devirtualize(&mut self) -> ! {
+        panic!("devirtualize not supported for this architecture");
+    }
 }
 
 /// The reasons of VM-exit and additional information.

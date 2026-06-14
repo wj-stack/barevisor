@@ -23,3 +23,4 @@
 .set registers_xmm3, 0xc0
 .set registers_xmm4, 0xd0
 .set registers_xmm5, 0xe0
+.set registers_mxcsr, 0xf0

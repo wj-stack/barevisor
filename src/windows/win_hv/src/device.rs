@@ -706,6 +706,12 @@ fn handle_ioctl_ept_unhook(
 extern "C" fn driver_unload(driver: *mut DRIVER_OBJECT) {
     eprintln!("win_hv unload: removing all EPT hooks");
     crate::ept_hook::uninstall_all();
+    eprintln!("win_hv unload: driver EPT hooks removed");
+
+    eprintln!("win_hv unload: devirtualizing (enter hv::devirtualize_system)");
+    hv::devirtualize_system();
+    eprintln!("win_hv unload: devirtualize_system returned");
+
     let mut symlink_buf = [0u16; 96];
     let Some(symlink_used) = encode_utf16z(SYMLINK_NAME, &mut symlink_buf) else {
         return;

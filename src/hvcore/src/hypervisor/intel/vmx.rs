@@ -29,6 +29,10 @@ impl Extension for Vmx {
         // root operation" allowing the use of the other VMX instructions.
         vmxon(&mut self.vmxon_region);
     }
+
+    fn disable(&mut self) {
+        // VMCLEAR and VMXOFF are executed on the guest VMCS in `perform_vmxoff`.
+    }
 }
 
 impl Vmx {

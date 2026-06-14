@@ -10,7 +10,8 @@ static LOGGER: Once<SerialLogger> = Once::new();
 
 pub(crate) fn init(level: log::LevelFilter) {
     let logger = LOGGER.call_once(SerialLogger::new);
-    log::set_logger(logger).unwrap();
+    // `log` allows only one global logger; virtualize and devirtualize both call init.
+    let _ = log::set_logger(logger);
     log::set_max_level(level);
 }
 
