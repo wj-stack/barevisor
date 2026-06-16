@@ -1,4 +1,4 @@
-//! This module implements enablement of AMD SVM.
+//! This module implements enablement and disablement of AMD SVM.
 
 use crate::hypervisor::{
     host::Extension,
@@ -6,7 +6,9 @@ use crate::hypervisor::{
 };
 
 #[derive(Default)]
-pub(crate) struct Svm;
+pub(crate) struct Svm {
+    saved_efer: u64,
+}
 
 impl Extension for Svm {
     fn enable(&mut self) {
@@ -14,6 +16,11 @@ impl Extension for Svm {
 
         // Enable SVM. We assume the processor is compatible with this.
         // See: 15.4 Enabling SVM
-        wrmsr(x86::msr::IA32_EFER, rdmsr(x86::msr::IA32_EFER) | EFER_SVME);
+        self.saved_efer = rdmsr(x86::msr::IA32_EFER);
+        wrmsr(x86::msr::IA32_EFER, self.saved_efer | EFER_SVME);
+    }
+
+    fn disable(&mut self) {
+        wrmsr(x86::msr::IA32_EFER, self.saved_efer);
     }
 }

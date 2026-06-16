@@ -164,6 +164,9 @@ pub(crate) trait Architecture {
 pub(crate) trait Extension: Default {
     /// Enables the hardware-assisted virtualization extension.
     fn enable(&mut self);
+
+    /// Disables the hardware-assisted virtualization extension.
+    fn disable(&mut self);
 }
 
 /// Represents an implementation of a guest.
@@ -182,6 +185,10 @@ pub(crate) trait Guest {
 
     /// Runs the guest until VM-exit occurs.
     fn run(&mut self) -> VmExitReason;
+
+    /// Tells the processor to stop operating on this guest. Must be called
+    /// before [`Extension::disable`].
+    fn deactivate(&mut self);
 
     /// Gets a reference to some of guest registers.
     fn regs(&mut self) -> &mut Registers;

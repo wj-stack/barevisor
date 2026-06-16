@@ -1,4 +1,4 @@
-//! This module implements enablement of Intel VMX.
+//! This module implements enablement and disablement of Intel VMX.
 
 use alloc::boxed::Box;
 use derive_more::Debug;
@@ -14,20 +14,38 @@ use crate::hypervisor::{
 #[derive(Default)]
 pub(crate) struct Vmx {
     vmxon_region: Vmxon,
+    saved_cr0: usize,
+    saved_cr4: usize,
 }
 
 impl Extension for Vmx {
     fn enable(&mut self) {
         // The current CR0, CR4 and IA32_FEATURE_CONTROL MSR may not satisfy the
         // requirements for enabling VMX. Update them as required,
-        cr0_write(get_adjusted_cr0(cr0()));
-        cr4_write(get_adjusted_cr4(cr4()));
+        let current_cr0 = cr0();
+        let current_cr4 = cr4();
+        self.saved_cr0 = current_cr0.bits();
+        self.saved_cr4 = current_cr4.bits();
+        cr0_write(get_adjusted_cr0(current_cr0));
+        cr4_write(get_adjusted_cr4(current_cr4));
         Self::update_feature_control_msr();
 
         // Then, execute the VMXON instruction. Successful execution of the
         // instruction puts the processor into the operation mode called "VMX
         // root operation" allowing the use of the other VMX instructions.
         vmxon(&mut self.vmxon_region);
+    }
+
+    fn disable(&mut self) {
+        // Execute the VMXOFF instruction. Successful execution leaves VMX root
+        // operation and allows the processor to execute other instructions that
+        // are not available in VMX operation.
+        // See: 23.8 LEAVING VMX OPERATION
+        vmxoff();
+
+        // Restore CR0 and CR4 to the values they had before `enable`.
+        cr0_write(unsafe { x86::controlregs::Cr0::from_bits_unchecked(self.saved_cr0) });
+        cr4_write(unsafe { x86::controlregs::Cr4::from_bits_unchecked(self.saved_cr4) });
     }
 }
 
@@ -95,4 +113,9 @@ fn vmxon(vmxon_region: &mut VmxonRaw) {
     let va = vmxon_region as *const _;
     let pa = platform_ops::get().pa(va as *const _);
     unsafe { x86::bits64::vmx::vmxon(pa).unwrap() };
+}
+
+/// The wrapper of the VMXOFF instruction.
+fn vmxoff() {
+    unsafe { x86::bits64::vmx::vmxoff().unwrap() };
 }

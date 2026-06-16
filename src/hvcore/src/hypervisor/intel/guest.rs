@@ -141,6 +141,12 @@ impl Guest for VmxGuest {
         }
     }
 
+    fn deactivate(&mut self) {
+        // Put the VMCS into the "clear" state before VMXOFF.
+        // See: 23.8 LEAVING VMX OPERATION
+        vmclear(&mut self.vmcs);
+    }
+
     fn regs(&mut self) -> &mut Registers {
         &mut self.registers
     }

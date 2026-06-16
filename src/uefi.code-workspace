@@ -8,7 +8,7 @@
 		}
 	],
 	"settings": {
-		"rust-analyzer.checkOnSave.overrideCommand": [
+		"rust-analyzer.check.overrideCommand": [
 			"cargo",
 			"check",
 			"--tests",

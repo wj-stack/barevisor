@@ -142,6 +142,13 @@ impl Guest for SvmGuest {
         }
     }
 
+    fn deactivate(&mut self) {
+        const SVM_MSR_VM_HSAVE_PA: u32 = 0xc001_0117;
+
+        // Clear the host state-save area address before disabling SVM.
+        wrmsr(SVM_MSR_VM_HSAVE_PA, 0);
+    }
+
     fn regs(&mut self) -> &mut Registers {
         &mut self.registers
     }
