@@ -8,6 +8,7 @@ use x86::{
 use crate::hypervisor::{
     HV_CPUID_INTERFACE, HV_CPUID_VENDOR_AND_MAX_FUNCTIONS, OUR_HV_VENDOR_NAME_EBX,
     OUR_HV_VENDOR_NAME_ECX, OUR_HV_VENDOR_NAME_EDX, apic_id,
+    hypercall,
     registers::Registers,
     x86_instructions::{cr4, cr4_write, rdmsr, wrmsr, xsetbv},
 };
@@ -52,7 +53,7 @@ fn virtualize_core<Arch: Architecture>(registers: &Registers) -> ! {
 
     // Create a new (empty) guest instance and set up its initial state.
     let id = apic_id::processor_id_from(apic_id::get()).unwrap();
-    let guest = &mut Arch::Guest::new(id);
+    let mut guest = Arch::Guest::new(id);
     guest.activate();
     guest.initialize(registers);
 
@@ -61,14 +62,43 @@ fn virtualize_core<Arch: Architecture>(registers: &Registers) -> ! {
         // Then, run the guest until VM-exit occurs. Some of events are handled
         // within the architecture specific code and nothing to do here.
         match guest.run() {
-            VmExitReason::Cpuid(info) => handle_cpuid(guest, &info),
-            VmExitReason::Rdmsr(info) => handle_rdmsr(guest, &info),
-            VmExitReason::Wrmsr(info) => handle_wrmsr(guest, &info),
-            VmExitReason::XSetBv(info) => handle_xsetbv(guest, &info),
+            VmExitReason::Cpuid(info) => handle_cpuid(&mut guest, &info),
+            VmExitReason::Rdmsr(info) => handle_rdmsr(&mut guest, &info),
+            VmExitReason::Wrmsr(info) => handle_wrmsr(&mut guest, &info),
+            VmExitReason::XSetBv(info) => handle_xsetbv(&mut guest, &info),
+            VmExitReason::VmCall(info) => {
+                if guest.regs().rax == hypercall::DEVIRTUALIZE {
+                    devirtualize_processor(&mut guest, &mut vt, &info);
+                } else {
+                    handle_vmcall(&mut guest, &info);
+                }
+            }
             VmExitReason::InitSignal | VmExitReason::StartupIpi | VmExitReason::NestedPageFault => {
             }
         }
     }
+}
+
+fn handle_vmcall<T: Guest>(guest: &mut T, info: &InstructionInfo) {
+    log::warn!("Unknown hypercall: {:#x?}", guest.regs().rax);
+    guest.regs().rax = u64::MAX;
+    guest.regs().rip = info.next_rip;
+}
+
+/// Leaves VMX root operation on the current processor. Mirrors Hypervisor From
+/// Scratch's `VmxVmxoff`: restore guest CPU state, clear the VMCS, execute
+/// VMXOFF, then return to the guest at the instruction after VMCALL.
+fn devirtualize_processor<T: Guest, E: Extension>(
+    guest: &mut T,
+    vt: &mut E,
+    info: &InstructionInfo,
+) -> ! {
+    log::info!("Devirtualizing the current processor");
+    guest.regs().rip = info.next_rip;
+    guest.load_guest_cpu_state();
+    guest.deactivate();
+    vt.disable();
+    unsafe { guest.regs().restore() };
 }
 
 fn handle_cpuid<T: Guest>(guest: &mut T, info: &InstructionInfo) {
@@ -190,6 +220,10 @@ pub(crate) trait Guest {
     /// before [`Extension::disable`].
     fn deactivate(&mut self);
 
+    /// Loads guest system register values into the physical processor before
+    /// leaving VMX root operation.
+    fn load_guest_cpu_state(&self);
+
     /// Gets a reference to some of guest registers.
     fn regs(&mut self) -> &mut Registers;
 }
@@ -200,6 +234,7 @@ pub(crate) enum VmExitReason {
     Rdmsr(InstructionInfo),
     Wrmsr(InstructionInfo),
     XSetBv(InstructionInfo),
+    VmCall(InstructionInfo),
     InitSignal,
     StartupIpi,
     NestedPageFault,

@@ -23,7 +23,7 @@ use crate::hypervisor::{
     platform_ops,
     registers::Registers,
     support::zeroed_box,
-    x86_instructions::{cr0, cr3, cr4, lidt, rdmsr, sgdt, sidt, wrmsr},
+    x86_instructions::{cr0, cr0_write, cr3, cr4, cr4_write, lidt, rdmsr, sgdt, sidt, wrmsr},
 };
 
 use super::npts::NestedPageTables;
@@ -86,6 +86,7 @@ impl Guest for SvmGuest {
     fn run(&mut self) -> VmExitReason {
         const VMEXIT_EXCEPTION_SX: u64 = 0x5e;
         const VMEXIT_CPUID: u64 = 0x72;
+        const VMEXIT_VMMCALL: u64 = 0x81;
         const VMEXIT_NPF: u64 = 0x400;
 
         self.vmcb.state_save_area.rax = self.registers.rax;
@@ -128,6 +129,9 @@ impl Guest for SvmGuest {
             VMEXIT_CPUID => VmExitReason::Cpuid(InstructionInfo {
                 next_rip: self.vmcb.control_area.nrip,
             }),
+            VMEXIT_VMMCALL => VmExitReason::VmCall(InstructionInfo {
+                next_rip: self.vmcb.control_area.nrip,
+            }),
             VMEXIT_NPF => {
                 self.handle_nested_page_fault();
                 VmExitReason::NestedPageFault
@@ -147,6 +151,45 @@ impl Guest for SvmGuest {
 
         // Clear the host state-save area address before disabling SVM.
         wrmsr(SVM_MSR_VM_HSAVE_PA, 0);
+    }
+
+    fn load_guest_cpu_state(&self) {
+        use crate::hypervisor::x86_instructions::lgdt;
+        use x86::dtables::DescriptorTablePointer;
+
+        const EFER_SVME: u64 = 1 << 12;
+
+        unsafe { cr3_write(self.vmcb.state_save_area.cr3) };
+        cr0_write(unsafe {
+            x86::controlregs::Cr0::from_bits_unchecked(self.vmcb.state_save_area.cr0 as usize)
+        });
+        cr4_write(unsafe {
+            x86::controlregs::Cr4::from_bits_unchecked(self.vmcb.state_save_area.cr4 as usize)
+        });
+        wrmsr(
+            x86::msr::IA32_EFER,
+            self.vmcb.state_save_area.efer & !EFER_SVME,
+        );
+        wrmsr(
+            x86::msr::IA32_FS_BASE,
+            self.vmcb.state_save_area.fs_base,
+        );
+        wrmsr(
+            x86::msr::IA32_GS_BASE,
+            self.vmcb.state_save_area.gs_base,
+        );
+
+        let gdtr = DescriptorTablePointer {
+            base: self.vmcb.state_save_area.gdtr_base as _,
+            limit: self.vmcb.state_save_area.gdtr_limit as u16,
+        };
+        lgdt(&gdtr);
+
+        let idtr = DescriptorTablePointer {
+            base: self.vmcb.state_save_area.idtr_base as _,
+            limit: self.vmcb.state_save_area.idtr_limit as u16,
+        };
+        lidt(&idtr);
     }
 
     fn regs(&mut self) -> &mut Registers {
@@ -429,10 +472,12 @@ impl SvmGuest {
     fn initialize_control(&mut self) {
         const SVM_INTERCEPT_MISC1_CPUID: u32 = 1 << 18;
         const SVM_INTERCEPT_MISC2_VMRUN: u32 = 1 << 0;
+        const SVM_INTERCEPT_MISC2_VMMCALL: u32 = 1 << 1;
         const SVM_NP_ENABLE_NP_ENABLE: u64 = 1 << 0;
 
         self.vmcb.control_area.intercept_misc1 = SVM_INTERCEPT_MISC1_CPUID;
-        self.vmcb.control_area.intercept_misc2 = SVM_INTERCEPT_MISC2_VMRUN;
+        self.vmcb.control_area.intercept_misc2 =
+            SVM_INTERCEPT_MISC2_VMRUN | SVM_INTERCEPT_MISC2_VMMCALL;
         self.vmcb.control_area.pause_filter_count = u16::MAX;
 
         // Address Space Identifier (ASID) is useful when the given logical processor

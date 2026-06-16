@@ -2,6 +2,7 @@
 
 use alloc::boxed::Box;
 use derive_more::Debug;
+use x86::controlregs::Cr4;
 
 use crate::hypervisor::{
     host::Extension,
@@ -14,8 +15,6 @@ use crate::hypervisor::{
 #[derive(Default)]
 pub(crate) struct Vmx {
     vmxon_region: Vmxon,
-    saved_cr0: usize,
-    saved_cr4: usize,
 }
 
 impl Extension for Vmx {
@@ -24,8 +23,6 @@ impl Extension for Vmx {
         // requirements for enabling VMX. Update them as required,
         let current_cr0 = cr0();
         let current_cr4 = cr4();
-        self.saved_cr0 = current_cr0.bits();
-        self.saved_cr4 = current_cr4.bits();
         cr0_write(get_adjusted_cr0(current_cr0));
         cr4_write(get_adjusted_cr4(current_cr4));
         Self::update_feature_control_msr();
@@ -37,15 +34,10 @@ impl Extension for Vmx {
     }
 
     fn disable(&mut self) {
-        // Execute the VMXOFF instruction. Successful execution leaves VMX root
-        // operation and allows the processor to execute other instructions that
-        // are not available in VMX operation.
-        // See: 23.8 LEAVING VMX OPERATION
         vmxoff();
 
-        // Restore CR0 and CR4 to the values they had before `enable`.
-        cr0_write(unsafe { x86::controlregs::Cr0::from_bits_unchecked(self.saved_cr0) });
-        cr4_write(unsafe { x86::controlregs::Cr4::from_bits_unchecked(self.saved_cr4) });
+        // Now that VMX is OFF, we have to unset vmx-enable bit on cr4
+        cr4_write(cr4() & !Cr4::CR4_ENABLE_VMX);
     }
 }
 

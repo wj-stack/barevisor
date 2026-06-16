@@ -5,6 +5,7 @@ pub mod allocator;
 mod amd;
 mod apic_id;
 pub mod gdt_tss;
+pub mod hypercall;
 mod host;
 mod intel;
 pub mod interrupt_handlers;
@@ -59,6 +60,21 @@ pub fn virtualize_system(shared_host: SharedHostData) {
     });
 
     log::info!("Virtualized the all processors");
+}
+
+/// Devirtualizes all logical processors on this system by issuing a VMCALL (or
+/// VMMCALL on AMD) on each processor. Mirrors Hypervisor From Scratch's
+/// `VmxTerminate` / `HvDpcBroadcastTerminateGuest`.
+pub fn devirtualize_system() {
+    if !is_our_hypervisor_present() {
+        return;
+    }
+
+    log::info!("Devirtualizing all processors");
+
+    platform_ops::get().run_on_all_processors(hypercall::devirtualize);
+
+    log::info!("Devirtualized all processors");
 }
 
 /// A collection of data that the host depends on for its entire lifespan.

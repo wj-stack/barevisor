@@ -8,18 +8,20 @@ mod ops;
 
 use alloc::boxed::Box;
 use wdk_sys::{
-    DRIVER_OBJECT, NTSTATUS, PCUNICODE_STRING, POOL_FLAG_NON_PAGED, STATUS_INSUFFICIENT_RESOURCES,
-    STATUS_SUCCESS, ntddk::ExAllocatePool2,
+    DRIVER_OBJECT, NTSTATUS, PCUNICODE_STRING, PDRIVER_OBJECT, POOL_FLAG_NON_PAGED,
+    STATUS_INSUFFICIENT_RESOURCES, STATUS_SUCCESS, ntddk::ExAllocatePool2,
 };
 
 #[unsafe(link_section = "INIT")]
 #[unsafe(export_name = "DriverEntry")]
 extern "C" fn driver_entry(
-    _driver: &mut DRIVER_OBJECT,
+    driver: &mut DRIVER_OBJECT,
     _registry_path: PCUNICODE_STRING,
 ) -> NTSTATUS {
     const POOL_TAG: u32 = u32::from_ne_bytes(*b"Bare");
     eprintln!("Loading win_hv.sys");
+
+    driver.DriverUnload = Some(driver_unload);
 
     // Initialize the global allocator with allocated buffer.
     let ptr = unsafe {
@@ -45,6 +47,12 @@ extern "C" fn driver_entry(
 
     eprintln!("Loaded win_hv.sys");
     STATUS_SUCCESS
+}
+
+extern "C" fn driver_unload(_driver: PDRIVER_OBJECT) {
+    eprintln!("Unloading win_hv.sys");
+    hv::devirtualize_system();
+    eprintln!("Unloaded win_hv.sys");
 }
 
 #[panic_handler]

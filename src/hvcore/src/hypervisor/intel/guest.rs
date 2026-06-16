@@ -88,6 +88,7 @@ impl Guest for VmxGuest {
     fn run(&mut self) -> VmExitReason {
         const VMX_EXIT_REASON_INIT: u16 = 3;
         const VMX_EXIT_REASON_SIPI: u16 = 4;
+        const VMX_EXIT_REASON_VMCALL: u16 = 18;
         const VMX_EXIT_REASON_CPUID: u16 = 10;
         const VMX_EXIT_REASON_RDMSR: u16 = 31;
         const VMX_EXIT_REASON_WRMSR: u16 = 32;
@@ -131,6 +132,9 @@ impl Guest for VmxGuest {
             VMX_EXIT_REASON_XSETBV => VmExitReason::XSetBv(InstructionInfo {
                 next_rip: self.registers.rip + vmread(vmcs::ro::VMEXIT_INSTRUCTION_LEN),
             }),
+            VMX_EXIT_REASON_VMCALL => VmExitReason::VmCall(InstructionInfo {
+                next_rip: self.registers.rip + vmread(vmcs::ro::VMEXIT_INSTRUCTION_LEN),
+            }),
             _ => {
                 log::error!("{:#x?}", self.vmcs);
                 panic!(
@@ -145,6 +149,36 @@ impl Guest for VmxGuest {
         // Put the VMCS into the "clear" state before VMXOFF.
         // See: 23.8 LEAVING VMX OPERATION
         vmclear(&mut self.vmcs);
+    }
+
+    fn load_guest_cpu_state(&self) {
+        use crate::hypervisor::x86_instructions::{
+            cr0_write, cr3_write, cr4_write, lgdt, lidt, wrmsr,
+        };
+        use x86::dtables::DescriptorTablePointer;
+
+        // Restore guest CR3 first so the process continues with its expected
+        // address space after VMXOFF. See: Hypervisor From Scratch, VmxVmxoff.
+        cr3_write(vmread(vmcs::guest::CR3));
+
+        cr0_write(unsafe { Cr0::from_bits_unchecked(vmread(vmcs::guest::CR0) as usize) });
+        cr4_write(unsafe { Cr4::from_bits_unchecked(vmread(vmcs::guest::CR4) as usize) });
+        wrmsr(x86::msr::IA32_FS_BASE, vmread(vmcs::guest::FS_BASE));
+        wrmsr(x86::msr::IA32_GS_BASE, vmread(vmcs::guest::GS_BASE));
+
+        // Restore GDTR/IDTR before VMXOFF. PatchGuard may detect them if left
+        // at host values. See: Hypervisor From Scratch, HvRestoreRegisters.
+        let gdtr = DescriptorTablePointer {
+            base: vmread(vmcs::guest::GDTR_BASE) as _,
+            limit: vmread(vmcs::guest::GDTR_LIMIT) as u16,
+        };
+        lgdt(&gdtr);
+
+        let idtr = DescriptorTablePointer {
+            base: vmread(vmcs::guest::IDTR_BASE) as _,
+            limit: vmread(vmcs::guest::IDTR_LIMIT) as u16,
+        };
+        lidt(&idtr);
     }
 
     fn regs(&mut self) -> &mut Registers {
@@ -202,7 +236,8 @@ impl VmxGuest {
                 VmxControl::ProcessorBased,
                 (vmcs::control::PrimaryControls::USE_MSR_BITMAPS
                     | vmcs::control::PrimaryControls::SECONDARY_CONTROLS)
-                    .bits() as _,
+                    .bits() as u64
+                    | (1 << 18), // VMCALL exiting
             ),
         );
         vmwrite(

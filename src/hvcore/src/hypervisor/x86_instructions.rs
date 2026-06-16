@@ -46,6 +46,11 @@ pub(crate) fn cr3() -> u64 {
     unsafe { x86::controlregs::cr3() }
 }
 
+/// Writes a value to the CR3.
+pub(crate) fn cr3_write(val: u64) {
+    unsafe { x86::controlregs::cr3_write(val) };
+}
+
 /// Reads the CR4.
 pub(crate) fn cr4() -> Cr4 {
     let value: usize;
@@ -56,6 +61,11 @@ pub(crate) fn cr4() -> Cr4 {
 /// Writes a value to the CR4.
 pub(crate) fn cr4_write(val: Cr4) {
     unsafe { x86::controlregs::cr4_write(val) };
+}
+
+/// Write a value to the GDTR.
+pub(crate) fn lgdt(gdtr: &DescriptorTablePointer<u64>) {
+    unsafe { x86::dtables::lgdt(gdtr) };
 }
 
 /// Write a value to the IDTR.

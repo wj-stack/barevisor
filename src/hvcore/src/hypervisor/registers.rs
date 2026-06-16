@@ -37,6 +37,12 @@ impl Registers {
         unsafe { capture_registers(&mut registers) };
         registers
     }
+
+    /// Restores register values and jumps to the captured RIP.
+    #[inline(always)]
+    pub(crate) unsafe fn restore(&self) -> ! {
+        unsafe { restore_registers(self) }
+    }
 }
 
 #[repr(C, align(16))]
@@ -49,6 +55,10 @@ pub(crate) struct Xmm {
 unsafe extern "C" {
     /// Captures current register values.
     unsafe fn capture_registers(registers: &mut Registers);
+
+    /// Restores register values and jumps to the captured RIP.
+    unsafe fn restore_registers(registers: &Registers) -> !;
 }
 global_asm!(include_str!("capture_registers.inc"));
 global_asm!(include_str!("capture_registers.S"));
+global_asm!(include_str!("restore_registers.S"));
