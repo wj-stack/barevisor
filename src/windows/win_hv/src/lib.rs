@@ -4,6 +4,7 @@
 extern crate alloc;
 
 mod eprintln;
+mod logger;
 mod ops;
 
 use alloc::boxed::Box;
@@ -39,6 +40,8 @@ extern "C" fn driver_entry(
 
     // Register the platform specific API.
     hv::platform_ops::init(Box::new(ops::WindowsOps));
+
+    logger::init(log::LevelFilter::Info);
 
     // Virtualize the system. No `SharedHostData` is given, meaning that host's
     // IDT, GDT, TSS and page tables are all that of the system process (PID=4).

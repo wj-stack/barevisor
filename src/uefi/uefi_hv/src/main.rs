@@ -57,6 +57,8 @@ fn main() -> Status {
     // version, the current IDT, GDT, TSS and paging structures are destroyed as
     // the system transition to the runtime-phase. Thus, the host cannot depend
     // on them and needs its own data structures.
+    hv::init_serial_logger(log::LevelFilter::Info);
+
     match create_shared_host_data() {
         Ok(shared_host) => hv::virtualize_system(shared_host),
         Err(e) => {

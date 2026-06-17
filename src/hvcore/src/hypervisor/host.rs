@@ -1,5 +1,6 @@
 //! This module implements architecture agnostic parts of the host code.
 
+use core::arch::asm;
 use x86::{
     controlregs::{Cr4, Xcr0},
     cpuid::cpuid,
@@ -7,8 +8,7 @@ use x86::{
 
 use crate::hypervisor::{
     HV_CPUID_INTERFACE, HV_CPUID_VENDOR_AND_MAX_FUNCTIONS, OUR_HV_VENDOR_NAME_EBX,
-    OUR_HV_VENDOR_NAME_ECX, OUR_HV_VENDOR_NAME_EDX, apic_id,
-    hypercall,
+    OUR_HV_VENDOR_NAME_ECX, OUR_HV_VENDOR_NAME_EDX, apic_id, hypercall,
     registers::Registers,
     x86_instructions::{cr4, cr4_write, rdmsr, wrmsr, xsetbv},
 };

@@ -161,8 +161,6 @@ impl Guest for VmxGuest {
         // address space after VMXOFF. See: Hypervisor From Scratch, VmxVmxoff.
         cr3_write(vmread(vmcs::guest::CR3));
 
-        cr0_write(unsafe { Cr0::from_bits_unchecked(vmread(vmcs::guest::CR0) as usize) });
-        cr4_write(unsafe { Cr4::from_bits_unchecked(vmread(vmcs::guest::CR4) as usize) });
         wrmsr(x86::msr::IA32_FS_BASE, vmread(vmcs::guest::FS_BASE));
         wrmsr(x86::msr::IA32_GS_BASE, vmread(vmcs::guest::GS_BASE));
 
@@ -179,6 +177,13 @@ impl Guest for VmxGuest {
             limit: vmread(vmcs::guest::IDTR_LIMIT) as u16,
         };
         lidt(&idtr);
+
+        log::info!("--------------------------------");
+        log::info!("Loaded guest CPU state:");
+        log::info!("GDTR: {:#x?}", gdtr);
+        log::info!("IDTR: {:#x?}", idtr);
+        log::info!("Registers: {:#x?}", self.registers);
+        log::info!("--------------------------------");
     }
 
     fn regs(&mut self) -> &mut Registers {

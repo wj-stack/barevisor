@@ -5,8 +5,8 @@ pub mod allocator;
 mod amd;
 mod apic_id;
 pub mod gdt_tss;
-pub mod hypercall;
 mod host;
+pub mod hypercall;
 mod intel;
 pub mod interrupt_handlers;
 pub mod paging_structures;
@@ -30,7 +30,6 @@ use self::interrupt_handlers::InterruptDescriptorTable;
 /// Hyperjacks the current system by virtualizing all logical processors on this
 /// system.
 pub fn virtualize_system(shared_host: SharedHostData) {
-    serial_logger::init(log::LevelFilter::Info);
     log::info!("Virtualizing the all processors");
 
     apic_id::init();

@@ -38,7 +38,7 @@ impl Registers {
         registers
     }
 
-    /// Restores register values and jumps to the captured RIP.
+    /// Restores register values and resumes execution at the captured RIP via RET.
     #[inline(always)]
     pub(crate) unsafe fn restore(&self) -> ! {
         unsafe { restore_registers(self) }
@@ -56,7 +56,7 @@ unsafe extern "C" {
     /// Captures current register values.
     unsafe fn capture_registers(registers: &mut Registers);
 
-    /// Restores register values and jumps to the captured RIP.
+    /// Restores register values and resumes execution at the captured RIP via RET.
     unsafe fn restore_registers(registers: &Registers) -> !;
 }
 global_asm!(include_str!("capture_registers.inc"));
