@@ -148,7 +148,7 @@ impl Guest for VmxGuest {
     fn deactivate(&mut self) {
         // Put the VMCS into the "clear" state before VMXOFF.
         // See: 23.8 LEAVING VMX OPERATION
-        // vmclear(&mut self.vmcs);
+        vmclear(&mut self.vmcs);
     }
 
     fn load_guest_cpu_state(&self) {
@@ -160,6 +160,9 @@ impl Guest for VmxGuest {
         // Restore guest CR3 first so the process continues with its expected
         // address space after VMXOFF. See: Hypervisor From Scratch, VmxVmxoff.
         cr3_write(vmread(vmcs::guest::CR3));
+
+        cr0_write(unsafe { Cr0::from_bits_unchecked(vmread(vmcs::guest::CR0) as usize) });
+        cr4_write(unsafe { Cr4::from_bits_unchecked(vmread(vmcs::guest::CR4) as usize) });
 
         wrmsr(x86::msr::IA32_FS_BASE, vmread(vmcs::guest::FS_BASE));
         wrmsr(x86::msr::IA32_GS_BASE, vmread(vmcs::guest::GS_BASE));

@@ -47,12 +47,6 @@ impl Extension for Vmx {
 
     fn disable(&mut self) {
         vmxoff();
-
-
-        let current_cr4 = cr4();
-
-        // Now that VMX is OFF, we have to unset vmx-enable bit on cr4
-        cr4_write(self.cr4);
     }
 }
 
