@@ -177,13 +177,6 @@ impl Guest for VmxGuest {
             limit: vmread(vmcs::guest::IDTR_LIMIT) as u16,
         };
         lidt(&idtr);
-
-        log::info!("--------------------------------");
-        log::info!("Loaded guest CPU state:");
-        log::info!("GDTR: {:#x?}", gdtr);
-        log::info!("IDTR: {:#x?}", idtr);
-        log::info!("Registers: {:#x?}", self.registers);
-        log::info!("--------------------------------");
     }
 
     fn regs(&mut self) -> &mut Registers {
