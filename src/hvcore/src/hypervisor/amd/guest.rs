@@ -23,7 +23,7 @@ use crate::hypervisor::{
     platform_ops,
     registers::Registers,
     support::zeroed_box,
-    x86_instructions::{cr0, cr3, cr4, lidt, rdmsr, sgdt, sidt, wrmsr},
+    x86_instructions::{cr0, cr0_write, cr3, cr4, cr4_write, lgdt, lidt, rdmsr, sgdt, sidt, wrmsr},
 };
 
 use super::npts::NestedPageTables;
@@ -144,6 +144,44 @@ impl Guest for SvmGuest {
                 )
             }
         }
+    }
+
+    fn deactivate(&mut self) {
+        const SVM_MSR_VM_HSAVE_PA: u32 = 0xc001_0117;
+
+        // Clear the host state-save area address before disabling SVM.
+        wrmsr(SVM_MSR_VM_HSAVE_PA, 0);
+    }
+
+    fn load_guest_cpu_state(&self) {
+        use x86::dtables::DescriptorTablePointer;
+
+        const EFER_SVME: u64 = 1 << 12;
+        let state = &self.vmcb.state_save_area;
+
+        // Restore guest CR3 first so the process continues with its expected
+        // address space after leaving SVM. See: Hypervisor From Scratch, VmxVmxoff.
+        unsafe { cr3_write(state.cr3) };
+
+        cr0_write(unsafe { x86::controlregs::Cr0::from_bits_unchecked(state.cr0 as usize) });
+        cr4_write(unsafe { x86::controlregs::Cr4::from_bits_unchecked(state.cr4 as usize) });
+        wrmsr(x86::msr::IA32_EFER, state.efer & !EFER_SVME);
+
+        // Restore FS/GS base. See: Hypervisor From Scratch, HvRestoreRegisters.
+        wrmsr(x86::msr::IA32_FS_BASE, state.fs_base);
+        wrmsr(x86::msr::IA32_GS_BASE, state.gs_base);
+
+        let gdtr = DescriptorTablePointer {
+            base: state.gdtr_base as _,
+            limit: state.gdtr_limit as u16,
+        };
+        lgdt(&gdtr);
+
+        let idtr = DescriptorTablePointer {
+            base: state.idtr_base as _,
+            limit: state.idtr_limit as u16,
+        };
+        lidt(&idtr);
     }
 
     fn regs(&mut self) -> &mut Registers {

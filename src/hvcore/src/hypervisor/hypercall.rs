@@ -22,7 +22,7 @@ pub const HV_HYPERCALL_UNINSTALL_EPT_HOOK2: u64 = 4;
 /// Restores the default installed hook view after a hooked syscall returns (RCX=GPA page base).
 pub const HV_HYPERCALL_RESTORE_EPT_HOOK2: u64 = 5;
 
-/// Turns off VMX on the current logical processor (only honored during `devirtualize_system`).
+/// Exits virtualization on the current logical processor.
 pub const HV_HYPERCALL_VMXOFF: u64 = 6;
 
 /// Returned in RAX when a hypercall succeeds.
@@ -153,9 +153,26 @@ pub fn restore_ept_hook2(gpa_page_base: u64) -> bool {
     status == HV_HYPERCALL_SUCCESS
 }
 
-/// Requests VMXOFF on the current logical processor via VMCALL.
+/// Issues the devirtualize hypercall. Does not return if the hypervisor handles it.
 #[inline]
-pub fn vmxoff() -> bool {
-    let (status, _, _, _) = issue(HV_HYPERCALL_VMXOFF, 0, 0, 0, 0);
-    status == HV_HYPERCALL_SUCCESS
+pub fn devirtualize() {
+    let is_intel = x86::cpuid::CpuId::new()
+        .get_vendor_info()
+        .is_some_and(|v| v.as_str() == "GenuineIntel");
+
+    unsafe {
+        if is_intel {
+            core::arch::asm!(
+                "vmcall",
+                in("rax") HV_HYPERCALL_VMXOFF,
+                options(nostack),
+            );
+        } else {
+            core::arch::asm!(
+                "vmmcall",
+                in("rax") HV_HYPERCALL_VMXOFF,
+                options(nostack),
+            );
+        }
+    }
 }

@@ -31,7 +31,7 @@ impl Extension for Vmx {
     }
 
     fn disable(&mut self) {
-        // VMCLEAR and VMXOFF are executed on the guest VMCS in `perform_vmxoff`.
+        vmxoff();
     }
 }
 
@@ -99,4 +99,9 @@ fn vmxon(vmxon_region: &mut VmxonRaw) {
     let va = vmxon_region as *const _;
     let pa = platform_ops::get().pa(va as *const _);
     unsafe { x86::bits64::vmx::vmxon(pa).unwrap() };
+}
+
+/// The wrapper of the VMXOFF instruction.
+fn vmxoff() {
+    unsafe { x86::bits64::vmx::vmxoff().unwrap() };
 }

@@ -160,25 +160,49 @@ impl Guest for VmxGuest {
         }
     }
 
-    fn regs(&mut self) -> &mut Registers {
-        &mut self.registers
+    fn deactivate(&mut self) {
+        // Put the VMCS into the "clear" state before VMXOFF.
+        // See: 23.8 LEAVING VMX OPERATION
+        vmclear(&mut self.vmcs);
     }
 
-    fn devirtualize(&mut self) -> ! {
-        super::devirt::perform_vmxoff(self)
+    fn load_guest_cpu_state(&self) {
+        use crate::hypervisor::x86_instructions::{
+            cr0_write, cr3_write, cr4_write, lgdt, lidt, wrmsr,
+        };
+        use x86::dtables::DescriptorTablePointer;
+
+        // Restore guest CR3 first so the process continues with its expected
+        // address space after VMXOFF. See: Hypervisor From Scratch, VmxVmxoff.
+        cr3_write(vmread(vmcs::guest::CR3));
+
+        cr0_write(unsafe { Cr0::from_bits_unchecked(vmread(vmcs::guest::CR0) as usize) });
+        cr4_write(unsafe { Cr4::from_bits_unchecked(vmread(vmcs::guest::CR4) as usize) });
+
+        wrmsr(x86::msr::IA32_FS_BASE, vmread(vmcs::guest::FS_BASE));
+        wrmsr(x86::msr::IA32_GS_BASE, vmread(vmcs::guest::GS_BASE));
+
+        // Restore GDTR/IDTR before VMXOFF. PatchGuard may detect them if left
+        // at host values. See: Hypervisor From Scratch, HvRestoreRegisters.
+        let gdtr = DescriptorTablePointer {
+            base: vmread(vmcs::guest::GDTR_BASE) as _,
+            limit: vmread(vmcs::guest::GDTR_LIMIT) as u16,
+        };
+        lgdt(&gdtr);
+
+        let idtr = DescriptorTablePointer {
+            base: vmread(vmcs::guest::IDTR_BASE) as _,
+            limit: vmread(vmcs::guest::IDTR_LIMIT) as u16,
+        };
+        lidt(&idtr);
+    }
+
+    fn regs(&mut self) -> &mut Registers {
+        &mut self.registers
     }
 }
 
 impl VmxGuest {
-    pub(crate) fn regs_mut(&mut self) -> &mut Registers {
-        &mut self.registers
-    }
-
-    pub(crate) fn vmclear_and_vmxoff(&mut self) {
-        vmclear(&mut self.vmcs);
-        unsafe { x86::bits64::vmx::vmxoff().unwrap() };
-    }
-
     /// Initializes the control fields of the VMCS.
     fn initialize_control(&self) {
         // - Set HOST_ADDRESS_SPACE_SIZE to run the host on the 64bit mode.
@@ -228,7 +252,8 @@ impl VmxGuest {
                 VmxControl::ProcessorBased,
                 (vmcs::control::PrimaryControls::USE_MSR_BITMAPS
                     | vmcs::control::PrimaryControls::SECONDARY_CONTROLS)
-                    .bits() as _,
+                    .bits() as u64
+                    | (1 << 18), // VMCALL exiting — required for devirtualize hypercalls
             ),
         );
         vmwrite(
@@ -676,10 +701,7 @@ pub(crate) fn ept_state() -> &'static spin::Mutex<EptState> {
 }
 
 pub(crate) fn reset_shared_guest_state() {
-    crate::hv_dbg!("devirt: reset_shared_guest_state (EPT + devirt flags)");
-    super::devirt::reset_devirt_prepare_state();
     SHARED_GUEST_DATA.ept.lock().reset();
-    crate::hv_dbg!("devirt: reset_shared_guest_state done");
 }
 
 pub(crate) fn vmcs_exit_qualification() -> u64 {

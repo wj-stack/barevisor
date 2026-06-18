@@ -7,11 +7,6 @@ pub trait PlatformOps {
     // This function cannot be called in a nested manner.
     fn run_on_all_processors(&self, callback: fn());
 
-    /// Runs `callback` on every logical processor in parallel (DPC on Windows).
-    fn broadcast_on_all_processors(&self, callback: fn()) {
-        self.run_on_all_processors(callback);
-    }
-
     // Returns a physical address of a linear address specified by `va`.
     fn pa(&self, va: *const core::ffi::c_void) -> u64;
 }
