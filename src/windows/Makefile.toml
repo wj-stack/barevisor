@@ -10,6 +10,7 @@ CARGO_MAKE_WORKSPACE_SKIP_MEMBERS = [
     "shared-contract",
     "win_hv_client",
     "kernel_ssdt",
+    "kernel_trace",
 ]
 
 [config]

@@ -31,7 +31,6 @@ use self::interrupt_handlers::InterruptDescriptorTable;
 /// Hyperjacks the current system by virtualizing all logical processors on this
 /// system.
 pub fn virtualize_system(shared_host: SharedHostData) {
-    serial_logger::init(log::LevelFilter::Info);
     log::info!("Virtualizing the all processors");
 
     apic_id::init();
@@ -67,7 +66,6 @@ pub fn virtualize_system(shared_host: SharedHostData) {
 /// VMMCALL on AMD) on each processor. Mirrors Hypervisor From Scratch's
 /// `VmxTerminate` / `HvDpcBroadcastTerminateGuest`.
 pub fn devirtualize_system() {
-    serial_logger::init(log::LevelFilter::Info);
     if !is_our_hypervisor_present() {
         return;
     }

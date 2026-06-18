@@ -402,6 +402,7 @@ pub(crate) trait Guest {
 }
 
 /// The reasons of VM-exit and additional information.
+// #[warn(unused)]
 pub(crate) enum VmExitReason {
     Cpuid(InstructionInfo),
     Rdmsr(InstructionInfo),

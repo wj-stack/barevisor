@@ -12,6 +12,8 @@ mod ops;
 mod paging;
 mod process;
 mod ssdt;
+mod trace;
+mod logger;
 
 use alloc::boxed::Box;
 use wdk_sys::{
@@ -25,6 +27,8 @@ extern "C" fn driver_entry(
     driver: &mut DRIVER_OBJECT,
     _registry_path: PCUNICODE_STRING,
 ) -> NTSTATUS {
+    logger::init(log::LevelFilter::Info);
+
     const POOL_TAG: u32 = u32::from_ne_bytes(*b"Bare");
     eprintln!("Loading win_hv.sys");
 
@@ -45,7 +49,6 @@ extern "C" fn driver_entry(
 
     // Register the platform specific API.
     hv::platform_ops::init(Box::new(ops::WindowsOps));
-    hv::set_debug_print(crate::eprintln::debug_print_str);
     eprintln!("PlatformOps registered");
 
     let status = device::create_device(driver);

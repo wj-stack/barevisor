@@ -4,7 +4,7 @@
 #![no_std]
 
 /// Logical contract version (bump when IOCTL shapes change).
-pub const CONTRACT_VERSION: &str = "0.6.1";
+pub const CONTRACT_VERSION: &str = "0.6.3";
 
 /// `FILE_DEVICE_UNKNOWN` for `CTL_CODE`.
 pub const FILE_DEVICE_UNKNOWN: u32 = 0x0000_0022;
@@ -134,6 +134,22 @@ pub const IOCTL_SSDT_HOOK_UNINSTALL: u32 = ctl_code(
 pub const IOCTL_SSDT_HOOK_SET_BLOCK_PID: u32 = ctl_code(
     FILE_DEVICE_UNKNOWN,
     0x913,
+    METHOD_BUFFERED,
+    FILE_ANY_ACCESS,
+);
+
+/// Clears kernel driver load/unload traces (`ClearTraceRequest`).
+pub const IOCTL_CLEAR_TRACE: u32 = ctl_code(
+    FILE_DEVICE_UNKNOWN,
+    0x914,
+    METHOD_BUFFERED,
+    FILE_ANY_ACCESS,
+);
+
+/// Queries kernel driver load/unload traces (`QueryTraceRequest`).
+pub const IOCTL_QUERY_TRACE: u32 = ctl_code(
+    FILE_DEVICE_UNKNOWN,
+    0x915,
     METHOD_BUFFERED,
     FILE_ANY_ACCESS,
 );
@@ -445,6 +461,79 @@ pub struct SsdtHookSetBlockPidRequest {
     pub pid: u32,
     /// Reserved; must be zero.
     pub _padding: u32,
+}
+
+/// Maximum driver file name length for [`IOCTL_CLEAR_TRACE`] (UTF-8 bytes, NUL excluded).
+pub const CLEAR_TRACE_DRIVER_NAME_MAX: usize = 64;
+
+/// Input for [`IOCTL_CLEAR_TRACE`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ClearTraceRequest {
+    /// Driver file name (e.g. `win_hv.sys`).
+    pub name: [u8; CLEAR_TRACE_DRIVER_NAME_MAX],
+    /// PiDDB timestamp for the driver entry.
+    pub stamp: u32,
+    /// Reserved; must be zero.
+    pub _padding: u32,
+}
+
+impl Default for ClearTraceRequest {
+    fn default() -> Self {
+        Self {
+            name: [0; CLEAR_TRACE_DRIVER_NAME_MAX],
+            stamp: 0,
+            _padding: 0,
+        }
+    }
+}
+
+/// Output for [`IOCTL_CLEAR_TRACE`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ClearTraceResponse {
+    /// `1` when at least one trace stage succeeded.
+    pub success: u8,
+    /// PiDDBCacheTable entry removed.
+    pub piddb: u8,
+    /// MmUnloadedDrivers entry obfuscated.
+    pub unloaded: u8,
+    /// g_KernelHashBucketList entry removed.
+    pub hash_bucket: u8,
+    /// g_CiEaCacheLookasideList reinitialized.
+    pub ci_ea_cache: u8,
+    /// Reserved; must be zero.
+    pub _padding: [u8; 3],
+}
+
+/// Driver trace is absent (not found in the structure).
+pub const TRACE_ABSENT: u8 = 0;
+/// Driver trace is present in the structure.
+pub const TRACE_PRESENT: u8 = 1;
+/// Structure scan failed (pattern/module not found on this OS build).
+pub const TRACE_SCAN_FAILED: u8 = 2;
+
+/// Input for [`IOCTL_QUERY_TRACE`] (same layout as [`ClearTraceRequest`]).
+pub type QueryTraceRequest = ClearTraceRequest;
+
+/// Output for [`IOCTL_QUERY_TRACE`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct QueryTraceResponse {
+    /// PiDDB status ([`TRACE_ABSENT`], [`TRACE_PRESENT`], [`TRACE_SCAN_FAILED`]).
+    pub piddb: u8,
+    /// MmUnloadedDrivers status.
+    pub unloaded: u8,
+    /// g_KernelHashBucketList status.
+    pub hash_bucket: u8,
+    /// g_CiEaCacheLookasideList scan status ([`TRACE_ABSENT`] = located, [`TRACE_SCAN_FAILED`]).
+    pub ci_ea: u8,
+    /// Reserved; must be zero.
+    pub _padding: [u8; 3],
+    /// PiDDB stamp when `piddb == TRACE_PRESENT`, otherwise `0`.
+    pub piddb_stamp: u32,
+    /// MmUnloadedDrivers slot index when `unloaded == TRACE_PRESENT`, otherwise `0`.
+    pub unloaded_slot: u32,
 }
 
 /// Input for [`IOCTL_READ_GVA`].

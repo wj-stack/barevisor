@@ -3,13 +3,14 @@
 use core::mem::size_of;
 
 use shared_contract::{
-    EptHook2Request, EptHook2Response, EptUnhookRequest, GetCr3ByPidRequest, GetCr3ByPidResponse,
-    GetSsdtFunctionRequest, GetSsdtFunctionResponse, GetSsdtResponse, IOCTL_EPT_HOOK2,
-    IOCTL_EPT_UNHOOK, IOCTL_GET_CR3_BY_PID, IOCTL_GET_SSDT, IOCTL_GET_SSDT_FUNCTION, IOCTL_PING,
-    IOCTL_READ_GVA, IOCTL_READ_MEMORY, IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY,
-    IOCTL_WRITE_PHYSICAL, MEM_IO_MAX_LEN, MemIoRequest, PhysMemIoRequest, PING_RESPONSE_U32,
-    ReadGvaRequest, TranslateGvaRequest, TranslateGvaResponse, TRANSLATE_FAIL_CR3,
-    TRANSLATE_METHOD_CR3_SWITCH, TRANSLATE_METHOD_PAGE_WALK,
+    ClearTraceRequest, ClearTraceResponse, EptHook2Request, EptHook2Response, EptUnhookRequest,
+    GetCr3ByPidRequest, GetCr3ByPidResponse, GetSsdtFunctionRequest, GetSsdtFunctionResponse,
+    GetSsdtResponse, IOCTL_CLEAR_TRACE, IOCTL_EPT_HOOK2, IOCTL_EPT_UNHOOK, IOCTL_GET_CR3_BY_PID,
+    IOCTL_GET_SSDT, IOCTL_GET_SSDT_FUNCTION, IOCTL_PING, IOCTL_QUERY_TRACE, IOCTL_READ_GVA,
+    IOCTL_READ_MEMORY, IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY, IOCTL_WRITE_PHYSICAL,
+    MEM_IO_MAX_LEN, MemIoRequest, PhysMemIoRequest, PING_RESPONSE_U32, QueryTraceRequest,
+    QueryTraceResponse, ReadGvaRequest, TranslateGvaRequest, TranslateGvaResponse,
+    TRANSLATE_FAIL_CR3, TRANSLATE_METHOD_CR3_SWITCH, TRANSLATE_METHOD_PAGE_WALK,
 };
 use wdk_sys::{
     CCHAR, DEVICE_OBJECT, DRIVER_OBJECT, IO_NO_INCREMENT, IRP, NTSTATUS,
@@ -112,6 +113,12 @@ unsafe extern "C" fn dispatch_device_control(
         IOCTL_GET_SSDT => handle_ioctl_get_ssdt(irp, output_len, system_buffer),
         IOCTL_GET_SSDT_FUNCTION => {
             handle_ioctl_get_ssdt_function(irp, input_len, output_len, system_buffer)
+        }
+        IOCTL_CLEAR_TRACE => {
+            handle_ioctl_clear_trace(irp, input_len, output_len, system_buffer)
+        }
+        IOCTL_QUERY_TRACE => {
+            handle_ioctl_query_trace(irp, input_len, output_len, system_buffer)
         }
         _ => {
             eprintln!("IOCTL unknown: {ioctl_code:#x}");
@@ -667,6 +674,76 @@ fn handle_ioctl_get_ssdt_function(
         };
     }
     unsafe { complete_request(irp, STATUS_SUCCESS, size_of::<GetSsdtFunctionResponse>()) }
+}
+
+fn handle_ioctl_clear_trace(
+    irp: *mut IRP,
+    input_len: usize,
+    output_len: usize,
+    system_buffer: *mut u8,
+) -> NTSTATUS {
+    if input_len < size_of::<ClearTraceRequest>() {
+        return unsafe { complete_request(irp, STATUS_INVALID_PARAMETER, 0) };
+    }
+    if output_len < size_of::<ClearTraceResponse>() {
+        return unsafe { complete_request(irp, STATUS_BUFFER_TOO_SMALL, 0) };
+    }
+    if system_buffer.is_null() {
+        return unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, 0) };
+    }
+
+    let request = unsafe {
+        system_buffer
+            .cast::<ClearTraceRequest>()
+            .read_unaligned()
+    };
+    let name = c_str_preview(&request.name);
+    eprintln!("IOCTL_CLEAR_TRACE: name={name} stamp={:#x}", request.stamp);
+    let response = crate::trace::clear_traces(&request.name, request.stamp);
+    unsafe {
+        system_buffer
+            .cast::<ClearTraceResponse>()
+            .write_unaligned(response);
+    }
+    if response.success == 0 {
+        eprintln!("IOCTL_CLEAR_TRACE failed: no traces cleared");
+        return unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, size_of::<ClearTraceResponse>()) };
+    }
+    eprintln!("IOCTL_CLEAR_TRACE ok");
+    unsafe { complete_request(irp, STATUS_SUCCESS, size_of::<ClearTraceResponse>()) }
+}
+
+fn handle_ioctl_query_trace(
+    irp: *mut IRP,
+    input_len: usize,
+    output_len: usize,
+    system_buffer: *mut u8,
+) -> NTSTATUS {
+    if input_len < size_of::<QueryTraceRequest>() {
+        return unsafe { complete_request(irp, STATUS_INVALID_PARAMETER, 0) };
+    }
+    if output_len < size_of::<QueryTraceResponse>() {
+        return unsafe { complete_request(irp, STATUS_BUFFER_TOO_SMALL, 0) };
+    }
+    if system_buffer.is_null() {
+        return unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, 0) };
+    }
+
+    let request = unsafe {
+        system_buffer
+            .cast::<QueryTraceRequest>()
+            .read_unaligned()
+    };
+    let name = c_str_preview(&request.name);
+    eprintln!("IOCTL_QUERY_TRACE: name={name} stamp={:#x}", request.stamp);
+    let response = crate::trace::query_traces(&request.name, request.stamp);
+    unsafe {
+        system_buffer
+            .cast::<QueryTraceResponse>()
+            .write_unaligned(response);
+    }
+    eprintln!("IOCTL_QUERY_TRACE ok");
+    unsafe { complete_request(irp, STATUS_SUCCESS, size_of::<QueryTraceResponse>()) }
 }
 
 fn handle_ioctl_ept_unhook(

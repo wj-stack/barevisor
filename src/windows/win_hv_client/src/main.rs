@@ -7,15 +7,17 @@ use std::os::windows::ffi::OsStrExt;
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use shared_contract::{
-    EptHook2Request, EptHook2Response, EptUnhookRequest, GetCr3ByPidRequest, GetCr3ByPidResponse,
-    GetSsdtFunctionRequest, GetSsdtFunctionResponse, GetSsdtResponse, IOCTL_EPT_HOOK2,
+    ClearTraceRequest, ClearTraceResponse, EptHook2Request, EptHook2Response, EptUnhookRequest,
+    GetCr3ByPidRequest, GetCr3ByPidResponse, GetSsdtFunctionRequest, GetSsdtFunctionResponse,
+    GetSsdtResponse, CLEAR_TRACE_DRIVER_NAME_MAX, IOCTL_CLEAR_TRACE, IOCTL_EPT_HOOK2,
     IOCTL_EPT_UNHOOK, IOCTL_GET_CR3_BY_PID, IOCTL_GET_SSDT, IOCTL_GET_SSDT_FUNCTION, IOCTL_PING,
-    IOCTL_READ_GVA, IOCTL_READ_MEMORY, IOCTL_SSDT_HOOK_GET_INFO, IOCTL_SSDT_HOOK_INSTALL,
-    IOCTL_SSDT_HOOK_SET_BLOCK_PID, IOCTL_SSDT_HOOK_UNINSTALL, IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY,
-    IOCTL_WRITE_PHYSICAL, MEM_IO_MAX_LEN, MemIoRequest, PhysMemIoRequest, PING_RESPONSE_U32,
-    ReadGvaRequest, SSDT_ERR_EXPORT, SSDT_ERR_NAME, SSDT_ERR_NO_MATCH, SSDT_ERR_NOT_FOUND,
-    SSDT_FUNCTION_NAME_MAX, SSDT_HOOK_USER_DEVICE_PATH, SsdtHookInfoResponse,
-    SsdtHookSetBlockPidRequest, TranslateGvaRequest, TranslateGvaResponse,
+    IOCTL_QUERY_TRACE, IOCTL_READ_GVA, IOCTL_READ_MEMORY, IOCTL_SSDT_HOOK_GET_INFO,
+    IOCTL_SSDT_HOOK_INSTALL, IOCTL_SSDT_HOOK_SET_BLOCK_PID, IOCTL_SSDT_HOOK_UNINSTALL,
+    IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY, IOCTL_WRITE_PHYSICAL, MEM_IO_MAX_LEN, MemIoRequest,
+    PhysMemIoRequest, PING_RESPONSE_U32, QueryTraceRequest, QueryTraceResponse, ReadGvaRequest,
+    SSDT_ERR_EXPORT, SSDT_ERR_NAME, SSDT_ERR_NO_MATCH, SSDT_ERR_NOT_FOUND, SSDT_FUNCTION_NAME_MAX,
+    SSDT_HOOK_USER_DEVICE_PATH, SsdtHookInfoResponse, SsdtHookSetBlockPidRequest,
+    TRACE_ABSENT, TRACE_PRESENT, TRACE_SCAN_FAILED, TranslateGvaRequest, TranslateGvaResponse,
     TRANSLATE_FAIL_CR3, TRANSLATE_FAIL_INVALID, TRANSLATE_FAIL_MMGPA, TRANSLATE_FAIL_PD,
     TRANSLATE_FAIL_PML4, TRANSLATE_FAIL_PDPT, TRANSLATE_FAIL_PTE, TRANSLATE_METHOD_CR3_SWITCH,
     TRANSLATE_METHOD_PAGE_WALK, USER_DEVICE_PATH,
@@ -141,6 +143,22 @@ enum Commands {
         /// Export name (e.g. `NtOpenProcess`).
         name: String,
     },
+    /// Clear kernel driver load/unload traces (PiDDB, MmUnloadedDrivers, CI caches).
+    ClearTrace {
+        /// Driver file name (e.g. `win_hv.sys`).
+        name: String,
+        /// PiDDB timestamp (hex). Use `0` to skip PiDDB lookup by stamp.
+        #[arg(long, default_value = "0")]
+        stamp: String,
+    },
+    /// Query kernel driver load/unload traces without modifying them.
+    QueryTrace {
+        /// Driver file name (e.g. `win_hv.sys`).
+        name: String,
+        /// PiDDB timestamp (hex). Use `0` to search PiDDB by name only.
+        #[arg(long, default_value = "0")]
+        stamp: String,
+    },
     /// Control the `ssdt_hook` example driver (`\\.\SsdtHook`).
     SsdtHook {
         #[command(subcommand)]
@@ -232,6 +250,8 @@ fn dispatch_win_hv(h: &HANDLE, command: Commands) -> anyhow::Result<()> {
         Commands::Unhook { target, pid } => ept_unhook(h, &target, pid),
         Commands::Ssdt => get_ssdt(h),
         Commands::SsdtFn { name } => get_ssdt_function(h, &name),
+        Commands::ClearTrace { name, stamp } => clear_trace(h, &name, &stamp),
+        Commands::QueryTrace { name, stamp } => query_trace(h, &name, &stamp),
         Commands::SsdtHook { .. } => unreachable!(),
     }
 }
@@ -750,6 +770,137 @@ fn ssdt_error_name(code: u8) -> &'static str {
         SSDT_ERR_NO_MATCH => "no_ssdt_match",
         SSDT_ERR_NAME => "invalid_name",
         _ => "unknown",
+    }
+}
+
+fn parse_trace_stamp(stamp: &str) -> anyhow::Result<u32> {
+    let stamp_trimmed = stamp.trim();
+    let stamp_trimmed = stamp_trimmed.strip_prefix("0x").unwrap_or(stamp_trimmed);
+    u32::from_str_radix(stamp_trimmed, 16)
+        .with_context(|| format!("invalid PiDDB stamp: {stamp}"))
+}
+
+fn trace_status_name(status: u8) -> &'static str {
+    match status {
+        TRACE_ABSENT => "absent",
+        TRACE_PRESENT => "present",
+        TRACE_SCAN_FAILED => "scan_failed",
+        _ => "unknown",
+    }
+}
+
+fn clear_trace(h: &HANDLE, name: &str, stamp: &str) -> anyhow::Result<()> {
+    if name.is_empty() || name.len() >= CLEAR_TRACE_DRIVER_NAME_MAX {
+        bail!("driver name length must be 1..{CLEAR_TRACE_DRIVER_NAME_MAX}");
+    }
+
+    let stamp = parse_trace_stamp(stamp)?;
+
+    let mut request = ClearTraceRequest::default();
+    request.name[..name.len()].copy_from_slice(name.as_bytes());
+    request.stamp = stamp;
+
+    let mut response = ClearTraceResponse::default();
+    let mut returned = 0u32;
+    unsafe {
+        DeviceIoControl(
+            *h,
+            IOCTL_CLEAR_TRACE,
+            Some(std::ptr::from_ref(&request).cast::<c_void>()),
+            size_of::<ClearTraceRequest>() as u32,
+            Some(std::ptr::from_mut(&mut response).cast::<c_void>()),
+            size_of::<ClearTraceResponse>() as u32,
+            Some(std::ptr::from_mut(&mut returned)),
+            None,
+        )?;
+    }
+    if returned as usize != size_of::<ClearTraceResponse>() {
+        bail!("IOCTL_CLEAR_TRACE returned {returned} bytes");
+    }
+    if response.success == 0 {
+        bail!("clear-trace failed: no matching traces were cleared for {name}");
+    }
+
+    println!("clear-trace ok for {name}:");
+    println!("  PiDDBCacheTable:          {}", flag(response.piddb));
+    println!("  MmUnloadedDrivers:        {}", flag(response.unloaded));
+    println!("  g_KernelHashBucketList:   {}", flag(response.hash_bucket));
+    println!("  g_CiEaCacheLookasideList: {}", flag(response.ci_ea_cache));
+    Ok(())
+}
+
+fn query_trace(h: &HANDLE, name: &str, stamp: &str) -> anyhow::Result<()> {
+    if name.is_empty() || name.len() >= CLEAR_TRACE_DRIVER_NAME_MAX {
+        bail!("driver name length must be 1..{CLEAR_TRACE_DRIVER_NAME_MAX}");
+    }
+
+    let stamp = parse_trace_stamp(stamp)?;
+
+    let mut request = QueryTraceRequest::default();
+    request.name[..name.len()].copy_from_slice(name.as_bytes());
+    request.stamp = stamp;
+
+    let mut response = QueryTraceResponse::default();
+    let mut returned = 0u32;
+    unsafe {
+        DeviceIoControl(
+            *h,
+            IOCTL_QUERY_TRACE,
+            Some(std::ptr::from_ref(&request).cast::<c_void>()),
+            size_of::<QueryTraceRequest>() as u32,
+            Some(std::ptr::from_mut(&mut response).cast::<c_void>()),
+            size_of::<QueryTraceResponse>() as u32,
+            Some(std::ptr::from_mut(&mut returned)),
+            None,
+        )?;
+    }
+    if returned as usize != size_of::<QueryTraceResponse>() {
+        bail!("IOCTL_QUERY_TRACE returned {returned} bytes");
+    }
+
+    print_trace_query(name, &response);
+    Ok(())
+}
+
+fn print_trace_query(name: &str, response: &QueryTraceResponse) {
+    println!("query-trace for {name}:");
+    print_trace_field("PiDDBCacheTable", response.piddb);
+    if response.piddb == TRACE_PRESENT {
+        println!("    stamp: {:#x}", response.piddb_stamp);
+    }
+    print_trace_field("MmUnloadedDrivers", response.unloaded);
+    if response.unloaded == TRACE_PRESENT {
+        println!("    slot:  {}", response.unloaded_slot);
+    }
+    print_trace_field("g_KernelHashBucketList", response.hash_bucket);
+    print_trace_field("g_CiEaCacheLookasideList", response.ci_ea);
+
+    let any_present = response.piddb == TRACE_PRESENT
+        || response.unloaded == TRACE_PRESENT
+        || response.hash_bucket == TRACE_PRESENT;
+    let any_scan_failed = response.piddb == TRACE_SCAN_FAILED
+        || response.unloaded == TRACE_SCAN_FAILED
+        || response.hash_bucket == TRACE_SCAN_FAILED
+        || response.ci_ea == TRACE_SCAN_FAILED;
+
+    if any_scan_failed {
+        println!("summary: one or more structures could not be scanned on this OS build");
+    } else if any_present {
+        println!("summary: driver trace still present in at least one structure");
+    } else {
+        println!("summary: no matching driver trace found");
+    }
+}
+
+fn print_trace_field(label: &str, status: u8) {
+    println!("  {label:28} {}", trace_status_name(status));
+}
+
+fn flag(value: u8) -> &'static str {
+    if value != 0 {
+        "cleared"
+    } else {
+        "skipped"
     }
 }
 

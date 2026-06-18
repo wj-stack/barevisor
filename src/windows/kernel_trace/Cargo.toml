@@ -1,0 +1,15 @@
+[package]
+name = "kernel_trace"
+description = "Windows kernel driver load/unload trace cleanup for kernel drivers"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+wdk-sys = "0.5.1"

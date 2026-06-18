@@ -444,6 +444,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kernel_trace"
+version = "0.1.0"
+dependencies = [
+ "wdk-sys",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1041,6 +1048,8 @@ version = "0.1.0"
 dependencies = [
  "hv",
  "kernel_ssdt",
+ "kernel_trace",
+ "log",
  "shared-contract",
  "spin",
  "wdk",
