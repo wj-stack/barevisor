@@ -12,9 +12,19 @@ use crate::hypervisor::{
     x86_instructions::{cr0, cr0_write, cr4, cr4_write, rdmsr, wrmsr},
 };
 
-#[derive(Default)]
 pub(crate) struct Vmx {
     vmxon_region: Vmxon,
+    cr4: Cr4,
+}
+
+impl Default for Vmx {
+    fn default() -> Self {
+        Self {
+            vmxon_region: Vmxon::default(),
+            // Overwritten in `enable()` before `disable()` uses it.
+            cr4: Cr4::empty(),
+        }
+    }
 }
 
 impl Extension for Vmx {
@@ -23,10 +33,12 @@ impl Extension for Vmx {
         // requirements for enabling VMX. Update them as required,
         let current_cr0 = cr0();
         let current_cr4 = cr4();
-        cr0_write(get_adjusted_cr0(current_cr0));
-        cr4_write(get_adjusted_cr4(current_cr4));
+        self.cr4 = current_cr4;
+        let new_cr4 = get_adjusted_cr4(current_cr4);
+        let new_cr0 = get_adjusted_cr0(current_cr0);
+        cr0_write(new_cr0);
+        cr4_write(new_cr4);
         Self::update_feature_control_msr();
-
         // Then, execute the VMXON instruction. Successful execution of the
         // instruction puts the processor into the operation mode called "VMX
         // root operation" allowing the use of the other VMX instructions.
@@ -36,8 +48,11 @@ impl Extension for Vmx {
     fn disable(&mut self) {
         vmxoff();
 
+
+        let current_cr4 = cr4();
+
         // Now that VMX is OFF, we have to unset vmx-enable bit on cr4
-        cr4_write(cr4() & !Cr4::CR4_ENABLE_VMX);
+        cr4_write(self.cr4);
     }
 }
 
