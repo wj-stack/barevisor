@@ -61,4 +61,5 @@ unsafe extern "C" {
 }
 global_asm!(include_str!("capture_registers.inc"));
 global_asm!(include_str!("capture_registers.S"));
+global_asm!(include_str!("restore_registers.inc"));
 global_asm!(include_str!("restore_registers.S"));
