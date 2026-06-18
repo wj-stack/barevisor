@@ -3,10 +3,12 @@
 
 use hv::platform_ops::PlatformOps;
 use wdk_sys::{
-    ALL_PROCESSOR_GROUPS, GROUP_AFFINITY, NT_SUCCESS, PAGED_CODE, PROCESSOR_NUMBER,
+    ALL_PROCESSOR_GROUPS, DISPATCH_LEVEL, GROUP_AFFINITY, KIRQL, NT_SUCCESS, PAGED_CODE,
+    PROCESSOR_NUMBER,
     ntddk::{
-        KeGetProcessorNumberFromIndex, KeQueryActiveProcessorCountEx,
-        KeRevertToUserGroupAffinityThread, KeSetSystemGroupAffinityThread, MmGetPhysicalAddress,
+        KeGetProcessorNumberFromIndex, KeLowerIrql, KeQueryActiveProcessorCountEx,
+        KeRevertToUserGroupAffinityThread, KeSetSystemGroupAffinityThread, KfRaiseIrql,
+        MmGetPhysicalAddress,
     },
 };
 
@@ -33,7 +35,11 @@ impl PlatformOps for WindowsOps {
             };
             unsafe { KeSetSystemGroupAffinityThread(&raw mut affinity, &raw mut old_affinity) };
 
+            let old_irql = unsafe { KfRaiseIrql(DISPATCH_LEVEL as KIRQL) };
+
             callback();
+
+            unsafe { KeLowerIrql(old_irql) };
 
             unsafe { KeRevertToUserGroupAffinityThread(&raw mut old_affinity) };
         }

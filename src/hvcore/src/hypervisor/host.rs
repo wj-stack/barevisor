@@ -33,7 +33,8 @@ pub(crate) fn main(registers: &Registers) -> ! {
     //
     // Note that NMI is still possible and can cause the same issue. We just
     // never observed it causing the described issues.
-    unsafe { x86::irq::disable() };
+
+    // unsafe { x86::irq::disable() };
 
     // Start the host on the current processor.
     if x86::cpuid::CpuId::new().get_vendor_info().unwrap().as_str() == "GenuineIntel" {

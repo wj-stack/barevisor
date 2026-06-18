@@ -60,6 +60,7 @@ unsafe extern "C" {
     unsafe fn restore_registers(registers: &Registers) -> !;
 }
 global_asm!(include_str!("capture_registers.inc"));
+global_asm!(include_str!("restore_registers.inc"));
 global_asm!(include_str!("capture_registers.S"));
 global_asm!(include_str!("restore_registers.inc"));
 global_asm!(include_str!("restore_registers.S"));
