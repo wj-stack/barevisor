@@ -4,7 +4,7 @@
 #![no_std]
 
 /// Logical contract version (bump when IOCTL shapes change).
-pub const CONTRACT_VERSION: &str = "0.6.3";
+pub const CONTRACT_VERSION: &str = "0.7.0";
 
 /// `FILE_DEVICE_UNKNOWN` for `CTL_CODE`.
 pub const FILE_DEVICE_UNKNOWN: u32 = 0x0000_0022;
@@ -150,6 +150,14 @@ pub const IOCTL_CLEAR_TRACE: u32 = ctl_code(
 pub const IOCTL_QUERY_TRACE: u32 = ctl_code(
     FILE_DEVICE_UNKNOWN,
     0x915,
+    METHOD_BUFFERED,
+    FILE_ANY_ACCESS,
+);
+
+/// Applies driver stealth measures (`HideRequest`).
+pub const IOCTL_HIDE: u32 = ctl_code(
+    FILE_DEVICE_UNKNOWN,
+    0x916,
     METHOD_BUFFERED,
     FILE_ANY_ACCESS,
 );
@@ -534,6 +542,79 @@ pub struct QueryTraceResponse {
     pub piddb_stamp: u32,
     /// MmUnloadedDrivers slot index when `unloaded == TRACE_PRESENT`, otherwise `0`.
     pub unloaded_slot: u32,
+}
+
+/// Maximum SCM service name length for [`IOCTL_HIDE`] (UTF-8 bytes, NUL excluded).
+pub const HIDE_SERVICE_NAME_MAX: usize = 64;
+
+/// Unlink from PsLoadedModuleList.
+pub const HIDE_FLAG_PS_LOADED_MODULE: u32 = 1 << 0;
+/// Delete the user-mode symbolic link (`\\DosDevices\\...`).
+pub const HIDE_FLAG_DEVICE_SYMLINK: u32 = 1 << 1;
+/// Delete SCM service registry keys under `Services\{name}` and `Enum\Root\LEGACY_{name}`.
+pub const HIDE_FLAG_REGISTRY: u32 = 1 << 2;
+/// Clear PiDDB / MmUnloadedDrivers / CI caches (same as [`IOCTL_CLEAR_TRACE`]).
+pub const HIDE_FLAG_CLEAR_TRACES: u32 = 1 << 3;
+/// Hide driver image from guest via EPT (reserved; currently disabled in the driver).
+pub const HIDE_FLAG_EPT_MEMORY: u32 = 1 << 4;
+/// Default stealth stages for `hide` (symlink and EPT hide excluded).
+pub const HIDE_FLAG_ALL: u32 = HIDE_FLAG_PS_LOADED_MODULE
+    | HIDE_FLAG_REGISTRY
+    | HIDE_FLAG_CLEAR_TRACES;
+
+/// Input for [`IOCTL_HIDE`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct HideRequest {
+    /// SCM service name (e.g. `hv`).
+    pub service_name: [u8; HIDE_SERVICE_NAME_MAX],
+    /// Driver file name for trace cleanup (e.g. `win_hv.sys`).
+    pub driver_name: [u8; CLEAR_TRACE_DRIVER_NAME_MAX],
+    /// PiDDB timestamp (hex value from PE header). `0` searches by name only.
+    pub stamp: u32,
+    /// Bitmask of [`HIDE_FLAG_*`] values.
+    pub flags: u32,
+}
+
+impl Default for HideRequest {
+    fn default() -> Self {
+        Self {
+            service_name: [0; HIDE_SERVICE_NAME_MAX],
+            driver_name: [0; CLEAR_TRACE_DRIVER_NAME_MAX],
+            stamp: 0,
+            flags: HIDE_FLAG_ALL,
+        }
+    }
+}
+
+/// Output for [`IOCTL_HIDE`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HideResponse {
+    /// `1` when at least one requested stage succeeded.
+    pub success: u8,
+    /// PsLoadedModuleList entry unlinked.
+    pub ps_loaded_module: u8,
+    /// Symbolic link deleted.
+    pub device_symlink: u8,
+    /// `\Services\{name}` registry key deleted.
+    pub service_registry: u8,
+    /// `\Enum\Root\LEGACY_{name}` registry key deleted.
+    pub legacy_enum_registry: u8,
+    /// PiDDBCacheTable entry removed.
+    pub piddb: u8,
+    /// MmUnloadedDrivers entry obfuscated.
+    pub unloaded: u8,
+    /// g_KernelHashBucketList entry removed.
+    pub hash_bucket: u8,
+    /// g_CiEaCacheLookasideList reinitialized.
+    pub ci_ea_cache: u8,
+    /// EPT pages redirected to a zero page (Intel only).
+    pub ept_memory: u8,
+    /// Reserved; must be zero.
+    pub _padding: [u8; 3],
+    /// Number of 4 KB pages hidden via EPT.
+    pub ept_pages_hidden: u32,
 }
 
 /// Input for [`IOCTL_READ_GVA`].

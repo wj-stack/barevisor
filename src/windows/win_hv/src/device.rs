@@ -5,12 +5,13 @@ use core::mem::size_of;
 use shared_contract::{
     ClearTraceRequest, ClearTraceResponse, EptHook2Request, EptHook2Response, EptUnhookRequest,
     GetCr3ByPidRequest, GetCr3ByPidResponse, GetSsdtFunctionRequest, GetSsdtFunctionResponse,
-    GetSsdtResponse, IOCTL_CLEAR_TRACE, IOCTL_EPT_HOOK2, IOCTL_EPT_UNHOOK, IOCTL_GET_CR3_BY_PID,
-    IOCTL_GET_SSDT, IOCTL_GET_SSDT_FUNCTION, IOCTL_PING, IOCTL_QUERY_TRACE, IOCTL_READ_GVA,
-    IOCTL_READ_MEMORY, IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY, IOCTL_WRITE_PHYSICAL,
-    MEM_IO_MAX_LEN, MemIoRequest, PhysMemIoRequest, PING_RESPONSE_U32, QueryTraceRequest,
-    QueryTraceResponse, ReadGvaRequest, TranslateGvaRequest, TranslateGvaResponse,
-    TRANSLATE_FAIL_CR3, TRANSLATE_METHOD_CR3_SWITCH, TRANSLATE_METHOD_PAGE_WALK,
+    GetSsdtResponse, HideRequest, HideResponse, IOCTL_CLEAR_TRACE, IOCTL_EPT_HOOK2, IOCTL_EPT_UNHOOK,
+    IOCTL_GET_CR3_BY_PID, IOCTL_GET_SSDT, IOCTL_GET_SSDT_FUNCTION, IOCTL_HIDE, IOCTL_PING,
+    IOCTL_QUERY_TRACE, IOCTL_READ_GVA, IOCTL_READ_MEMORY, IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY,
+    IOCTL_WRITE_PHYSICAL, MEM_IO_MAX_LEN, MemIoRequest, PhysMemIoRequest, PING_RESPONSE_U32,
+    QueryTraceRequest, QueryTraceResponse, ReadGvaRequest, TranslateGvaRequest,
+    TranslateGvaResponse, TRANSLATE_FAIL_CR3, TRANSLATE_METHOD_CR3_SWITCH,
+    TRANSLATE_METHOD_PAGE_WALK,
 };
 use wdk_sys::{
     CCHAR, DEVICE_OBJECT, DRIVER_OBJECT, IO_NO_INCREMENT, IRP, NTSTATUS,
@@ -120,6 +121,7 @@ unsafe extern "C" fn dispatch_device_control(
         IOCTL_QUERY_TRACE => {
             handle_ioctl_query_trace(irp, input_len, output_len, system_buffer)
         }
+        IOCTL_HIDE => handle_ioctl_hide(irp, input_len, output_len, system_buffer),
         _ => {
             eprintln!("IOCTL unknown: {ioctl_code:#x}");
             unsafe { complete_request(irp, STATUS_INVALID_DEVICE_REQUEST, 0) }
@@ -746,6 +748,38 @@ fn handle_ioctl_query_trace(
     unsafe { complete_request(irp, STATUS_SUCCESS, size_of::<QueryTraceResponse>()) }
 }
 
+fn handle_ioctl_hide(
+    irp: *mut IRP,
+    input_len: usize,
+    output_len: usize,
+    system_buffer: *mut u8,
+) -> NTSTATUS {
+    if input_len < size_of::<HideRequest>() {
+        return unsafe { complete_request(irp, STATUS_INVALID_PARAMETER, 0) };
+    }
+    if output_len < size_of::<HideResponse>() {
+        return unsafe { complete_request(irp, STATUS_BUFFER_TOO_SMALL, 0) };
+    }
+    if system_buffer.is_null() {
+        return unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, 0) };
+    }
+
+    let request = unsafe { system_buffer.cast::<HideRequest>().read_unaligned() };
+    crate::eprintln!("IOCTL_HIDE: dispatch begin");
+    let response = crate::stealth::apply(&request);
+    unsafe {
+        system_buffer
+            .cast::<HideResponse>()
+            .write_unaligned(response);
+    }
+    if response.success == 0 {
+        crate::eprintln!("IOCTL_HIDE: failed no stage succeeded");
+        return unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, size_of::<HideResponse>()) };
+    }
+    crate::eprintln!("IOCTL_HIDE: dispatch ok");
+    unsafe { complete_request(irp, STATUS_SUCCESS, size_of::<HideResponse>()) }
+}
+
 fn handle_ioctl_ept_unhook(
     irp: *mut IRP,
     input_len: usize,
@@ -805,6 +839,16 @@ extern "C" fn driver_unload(driver: *mut DRIVER_OBJECT) {
         }
     }
     eprintln!("Unloaded win_hv.sys");
+}
+
+/// Deletes the user-mode symbolic link so `\\.\BarevisorHv` can no longer be opened.
+pub(crate) fn delete_user_symlink() -> bool {
+    let mut symlink_buf = [0u16; 96];
+    let Some(symlink_used) = encode_utf16z(SYMLINK_NAME, &mut symlink_buf) else {
+        return false;
+    };
+    let mut symlink = to_unicode_string(&mut symlink_buf, symlink_used);
+    wdk::nt_success(unsafe { wdk_sys::ntddk::IoDeleteSymbolicLink(&raw mut symlink) })
 }
 
 pub(crate) fn create_device(driver: &mut DRIVER_OBJECT) -> NTSTATUS {

@@ -4,6 +4,7 @@
 
 use super::host::Architecture;
 
+pub(crate) mod ept_hide;
 pub(crate) mod ept_hook;
 pub(crate) mod epts;
 pub(crate) mod guest;

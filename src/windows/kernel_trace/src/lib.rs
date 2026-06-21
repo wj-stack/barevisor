@@ -379,6 +379,28 @@ fn query_ci_ea_cache_lookaside_list() -> u8 {
     TRACE_ABSENT
 }
 
+fn remove_piddb_entry(piddb_table: *mut c_void, entry: *mut PiddbCacheEntry) -> bool {
+    let prev = unsafe { (*entry).list.blink };
+    let next = unsafe { (*entry).list.flink };
+    if !prev.is_null() && !next.is_null() {
+        unsafe {
+            (*prev).flink = next;
+            (*next).blink = prev;
+        }
+    }
+    if unsafe { RtlDeleteElementGenericTableAvl(piddb_table, entry.cast()) != 0 } {
+        let avl = piddb_table.cast::<RtlAvlTable>();
+        unsafe {
+            if (*avl).delete_count > 0 {
+                (*avl).delete_count -= 1;
+            }
+        }
+        true
+    } else {
+        false
+    }
+}
+
 fn clear_piddb_cache(driver_name: &str, stamp: u32) -> bool {
     let Ok((ntos_base, ntos_size)) = module_image("ntoskrnl.exe") else {
         return false;
@@ -410,47 +432,57 @@ fn clear_piddb_cache(driver_name: &str, stamp: u32) -> bool {
         return false;
     }
 
-    let mut wide = [0u16; 128];
-    if !encode_wide(driver_name, &mut wide) {
-        return false;
-    }
-
-    let mut lookup = PiddbCacheEntry {
-        list: ListEntry {
-            flink: core::ptr::null_mut(),
-            blink: core::ptr::null_mut(),
-        },
-        name: UNICODE_STRING::default(),
-        stamp,
-        status: 0,
-        _padding: [0; 16],
-    };
-    unsafe { RtlInitUnicodeString(&raw mut lookup.name, wide.as_ptr()) };
-
     let mut cleared = false;
     if unsafe { ExAcquireResourceExclusiveLite(piddb_lock, 1) != 0 } {
-        let entry = unsafe {
-            RtlLookupElementGenericTableAvl(
-                piddb_table,
-                (&raw const lookup).cast(),
-            )
-        };
-        if !entry.is_null() {
-            let entry = entry.cast::<PiddbCacheEntry>();
-            let prev = unsafe { (*entry).list.blink };
-            let next = unsafe { (*entry).list.flink };
-            if !prev.is_null() && !next.is_null() {
-                unsafe {
-                    (*prev).flink = next;
-                    (*next).blink = prev;
-                }
+        if stamp != 0 {
+            let mut wide = [0u16; 128];
+            if !encode_wide(driver_name, &mut wide) {
+                unsafe { ExReleaseResourceLite(piddb_lock) };
+                return false;
             }
-            if unsafe { RtlDeleteElementGenericTableAvl(piddb_table, entry.cast()) != 0 } {
-                let avl = piddb_table.cast::<RtlAvlTable>();
-                unsafe {
-                    if (*avl).delete_count > 0 {
-                        (*avl).delete_count -= 1;
+            let mut lookup = PiddbCacheEntry {
+                list: ListEntry {
+                    flink: core::ptr::null_mut(),
+                    blink: core::ptr::null_mut(),
+                },
+                name: UNICODE_STRING::default(),
+                stamp,
+                status: 0,
+                _padding: [0; 16],
+            };
+            unsafe { RtlInitUnicodeString(&raw mut lookup.name, wide.as_ptr()) };
+            let entry = unsafe {
+                RtlLookupElementGenericTableAvl(piddb_table, (&raw const lookup).cast())
+            };
+            if !entry.is_null() {
+                cleared = remove_piddb_entry(piddb_table, entry.cast());
+            }
+        } else {
+            let wide_name = driver_name_to_wide(driver_name);
+            loop {
+                let mut restart = 1u8;
+                let mut found: *mut PiddbCacheEntry = core::ptr::null_mut();
+                loop {
+                    let entry = unsafe { RtlEnumerateGenericTableAvl(piddb_table, restart) };
+                    restart = 0;
+                    if entry.is_null() {
+                        break;
                     }
+                    let entry_ref = unsafe { entry.cast::<PiddbCacheEntry>().read() };
+                    if unicode_contains(
+                        entry_ref.name.Buffer,
+                        entry_ref.name.Length,
+                        &wide_name,
+                    ) {
+                        found = entry.cast();
+                        break;
+                    }
+                }
+                if found.is_null() {
+                    break;
+                }
+                if !remove_piddb_entry(piddb_table, found) {
+                    break;
                 }
                 cleared = true;
             }

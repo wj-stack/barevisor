@@ -1,0 +1,15 @@
+[package]
+name = "kernel_stealth"
+description = "Windows kernel driver stealth helpers (module unlink, registry cleanup)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+wdk-sys = "0.5.1"

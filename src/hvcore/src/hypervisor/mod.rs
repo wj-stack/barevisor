@@ -77,6 +77,30 @@ pub fn devirtualize_system() {
     log::info!("Devirtualized all processors");
 }
 
+/// Hides a host physical memory range from the guest (Intel EPT only).
+///
+/// Returns the number of 4 KB pages hidden, or `0` on non-Intel hosts / failure.
+pub fn hide_guest_physical_memory(start_pa: u64, size: u64) -> u32 {
+    if !is_intel_host() {
+        log::warn!("hide_guest_physical_memory: skipped non-Intel host pa={start_pa:#x} size={size:#x}");
+        return 0;
+    }
+    let mut ept = intel::guest::ept_state().lock();
+    match intel::ept_hide::hide_physical_range(&mut ept, start_pa, size) {
+        Ok(count) => count,
+        Err(err) => {
+            log::warn!("hide_guest_physical_memory: pa={start_pa:#x} size={size:#x} err={err:?}");
+            0
+        }
+    }
+}
+
+fn is_intel_host() -> bool {
+    x86::cpuid::CpuId::new()
+        .get_vendor_info()
+        .is_some_and(|vendor| vendor.as_str() == "GenuineIntel")
+}
+
 /// A collection of data that the host depends on for its entire lifespan.
 #[derive(Debug, Default)]
 pub struct SharedHostData {

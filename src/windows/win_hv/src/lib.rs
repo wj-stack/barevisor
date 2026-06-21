@@ -12,6 +12,7 @@ mod ops;
 mod paging;
 mod process;
 mod ssdt;
+mod stealth;
 mod trace;
 mod logger;
 
@@ -46,6 +47,7 @@ extern "C" fn driver_entry(
     }
     hv::allocator::init(ptr.cast::<u8>());
     eprintln!("Allocator initialized at {ptr:p}");
+    stealth::register_driver_context(driver, ptr.cast::<u8>());
 
     // Register the platform specific API.
     hv::platform_ops::init(Box::new(ops::WindowsOps));

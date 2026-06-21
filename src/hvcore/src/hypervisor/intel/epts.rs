@@ -198,6 +198,34 @@ impl EptState {
 
         Err(EptError::InvalidAddress)
     }
+
+    /// Redirects each 4 KB page in `[start_pa, start_pa + size)` to `zero_pfn` (read-only).
+    pub(crate) fn hide_physical_range(
+        &mut self,
+        start_pa: u64,
+        size: u64,
+        zero_pfn: u64,
+    ) -> Result<u32, EptError> {
+        if size == 0 {
+            return Ok(0);
+        }
+
+        let end = start_pa.saturating_add(size);
+        let mut page = start_pa & !(BASE_PAGE_SIZE as u64 - 1);
+        let mut hidden = 0u32;
+
+        while page < end {
+            self.split_2mb_to_4kb(page)?;
+            let pte = self.pml1_entry_mut(page)?;
+            pte.hide_as_zero_page(zero_pfn);
+            hidden = hidden.saturating_add(1);
+            page = page.saturating_add(BASE_PAGE_SIZE as u64);
+        }
+
+        core::sync::atomic::fence(Ordering::SeqCst);
+        invept_single_context(self.eptp());
+        Ok(hidden)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -429,6 +457,15 @@ impl EptEntry {
         self.set_executable(true);
         self.set_large(false);
         self.set_pfn(exec_pfn);
+    }
+
+    /// Guest read-only view of a zero page (hides the original host PFN).
+    pub(crate) fn hide_as_zero_page(&mut self, zero_pfn: u64) {
+        self.set_pfn(zero_pfn);
+        self.set_readable(true);
+        self.set_writable(false);
+        self.set_executable(false);
+        self.set_large(false);
     }
 }
 
