@@ -1,8 +1,10 @@
 [workspace]
 members = [
+    "asuscert_bypass",
     "check_hv_vendor",
     "hook_example",
     "kernel_ssdt",
+    "kernel_stealth",
     "kernel_trace",
     "shared-contract",
     "ssdt_hook",

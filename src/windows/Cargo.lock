@@ -68,6 +68,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "asuscert_bypass"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -438,6 +447,13 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "kernel_ssdt"
+version = "0.1.0"
+dependencies = [
+ "wdk-sys",
+]
+
+[[package]]
+name = "kernel_stealth"
 version = "0.1.0"
 dependencies = [
  "wdk-sys",
@@ -1048,6 +1064,7 @@ version = "0.1.0"
 dependencies = [
  "hv",
  "kernel_ssdt",
+ "kernel_stealth",
  "kernel_trace",
  "log",
  "shared-contract",
