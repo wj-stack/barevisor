@@ -11,20 +11,23 @@ use std::os::windows::ffi::OsStrExt;
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use shared_contract::{
-    ClearTraceRequest, ClearTraceResponse, EptHook2Request, EptHook2Response, EptUnhookRequest,
-    GetCr3ByPidRequest, GetCr3ByPidResponse, GetSsdtFunctionRequest, GetSsdtFunctionResponse,
-    GetSsdtResponse, HideRequest, HideResponse, CLEAR_TRACE_DRIVER_NAME_MAX, HIDE_FLAG_ALL,
-    HIDE_SERVICE_NAME_MAX, IOCTL_CLEAR_TRACE, IOCTL_EPT_HOOK2, IOCTL_EPT_UNHOOK, IOCTL_GET_CR3_BY_PID,
-    IOCTL_GET_SSDT, IOCTL_GET_SSDT_FUNCTION, IOCTL_HIDE, IOCTL_PING, IOCTL_QUERY_TRACE, IOCTL_READ_GVA, IOCTL_READ_MEMORY, IOCTL_SSDT_HOOK_GET_INFO,
-    IOCTL_SSDT_HOOK_INSTALL, IOCTL_SSDT_HOOK_SET_BLOCK_PID, IOCTL_SSDT_HOOK_UNINSTALL,
-    IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY, IOCTL_WRITE_PHYSICAL, MEM_IO_MAX_LEN, MemIoRequest,
-    PhysMemIoRequest, PING_RESPONSE_U32, QueryTraceRequest, QueryTraceResponse, ReadGvaRequest,
+    CamouflageRequest, CamouflageResponse, ClearTraceRequest, ClearTraceResponse, EptHook2Request,
+    EptHook2Response, EptUnhookRequest, GetCr3ByPidRequest, GetCr3ByPidResponse,
+    GetSsdtFunctionRequest, GetSsdtFunctionResponse, GetSsdtResponse, HideRequest, HideResponse,
+    CAMOUFLAGE_BASE_NAME_MAX, CAMOUFLAGE_DRIVER_NAME_MAX, CAMOUFLAGE_FLAG_ALL,
+    CAMOUFLAGE_FULL_PATH_MAX, CLEAR_TRACE_DRIVER_NAME_MAX, HIDE_FLAG_ALL, HIDE_SERVICE_NAME_MAX,
+    IOCTL_CAMOUFLAGE, IOCTL_CLEAR_TRACE, IOCTL_EPT_HOOK2, IOCTL_EPT_UNHOOK, IOCTL_GET_CR3_BY_PID,
+    IOCTL_GET_SSDT, IOCTL_GET_SSDT_FUNCTION, IOCTL_HIDE, IOCTL_PING, IOCTL_QUERY_TRACE,
+    IOCTL_READ_GVA, IOCTL_READ_MEMORY, IOCTL_SSDT_HOOK_GET_INFO, IOCTL_SSDT_HOOK_INSTALL,
+    IOCTL_SSDT_HOOK_SET_BLOCK_PID, IOCTL_SSDT_HOOK_UNINSTALL, IOCTL_TRANSLATE_GVA,
+    IOCTL_WRITE_MEMORY, IOCTL_WRITE_PHYSICAL, MEM_IO_MAX_LEN, MemIoRequest, PhysMemIoRequest,
+    PING_RESPONSE_U32, QueryTraceRequest, QueryTraceResponse, ReadGvaRequest,
     SSDT_ERR_EXPORT, SSDT_ERR_NAME, SSDT_ERR_NO_MATCH, SSDT_ERR_NOT_FOUND, SSDT_FUNCTION_NAME_MAX,
-    SSDT_HOOK_USER_DEVICE_PATH, SsdtHookInfoResponse, SsdtHookSetBlockPidRequest,
-    TRACE_ABSENT, TRACE_PRESENT, TRACE_SCAN_FAILED, TranslateGvaRequest, TranslateGvaResponse,
-    TRANSLATE_FAIL_CR3, TRANSLATE_FAIL_INVALID, TRANSLATE_FAIL_MMGPA, TRANSLATE_FAIL_PD,
-    TRANSLATE_FAIL_PML4, TRANSLATE_FAIL_PDPT, TRANSLATE_FAIL_PTE, TRANSLATE_METHOD_CR3_SWITCH,
-    TRANSLATE_METHOD_PAGE_WALK, USER_DEVICE_PATH,
+    SSDT_HOOK_USER_DEVICE_PATH, SsdtHookInfoResponse, SsdtHookSetBlockPidRequest, TRACE_ABSENT,
+    TRACE_PRESENT, TRACE_SCAN_FAILED, TranslateGvaRequest, TranslateGvaResponse, TRANSLATE_FAIL_CR3,
+    TRANSLATE_FAIL_INVALID, TRANSLATE_FAIL_MMGPA, TRANSLATE_FAIL_PD, TRANSLATE_FAIL_PML4,
+    TRANSLATE_FAIL_PDPT, TRANSLATE_FAIL_PTE, TRANSLATE_METHOD_CR3_SWITCH, TRANSLATE_METHOD_PAGE_WALK,
+    USER_DEVICE_PATH,
 };
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::Storage::FileSystem::{
@@ -178,6 +181,21 @@ enum Commands {
         #[arg(long, default_value = "0")]
         flags: String,
     },
+    /// Post-load module camouflage (rename LDR entry / driver object strings).
+    Camouflage {
+        /// Fake module basename (e.g. `360AntiHacker64.sys`).
+        #[arg(long)]
+        base: String,
+        /// Fake full image path. Default: `\SystemRoot\System32\drivers\{base}`.
+        #[arg(long)]
+        full: Option<String>,
+        /// Fake driver object name without `\Driver\` prefix. Default: `{base}` without `.sys`.
+        #[arg(long)]
+        driver: Option<String>,
+        /// Stage flags hex mask (default: all stages).
+        #[arg(long, default_value = "0")]
+        flags: String,
+    },
     /// Control the `ssdt_hook` example driver (`\\.\SsdtHook`).
     SsdtHook {
         #[command(subcommand)]
@@ -288,6 +306,7 @@ fn print_shell_help() {
     println!("  ping");
     println!("  read 0xfffff80000000000 -s 32");
     println!("  cr3 1234");
+    println!("  camouflage --base 360AntiHacker64.sys");
     println!();
     println!("asio3 examples:");
     println!("  asio3 open");
@@ -404,6 +423,12 @@ fn dispatch_win_hv(h: &HANDLE, command: Commands) -> anyhow::Result<()> {
             stamp,
             flags,
         } => hide_driver(h, &service, &driver, &stamp, &flags),
+        Commands::Camouflage {
+            base,
+            full,
+            driver,
+            flags,
+        } => camouflage_driver(h, &base, full.as_deref(), driver.as_deref(), &flags),
         Commands::SsdtHook { .. }
         | Commands::Iomap64 { .. }
         | Commands::Asio3 { .. }
@@ -1081,6 +1106,81 @@ fn hide_driver(
     println!("  MmUnloadedDrivers:        {}", flag(response.unloaded));
     println!("  g_KernelHashBucketList:   {}", flag(response.hash_bucket));
     println!("  g_CiEaCacheLookasideList: {}", flag(response.ci_ea_cache));
+    Ok(())
+}
+
+fn parse_camouflage_flags(input: &str) -> anyhow::Result<u32> {
+    if input == "0" {
+        return Ok(CAMOUFLAGE_FLAG_ALL);
+    }
+    let trimmed = input.trim();
+    let trimmed = trimmed.strip_prefix("0x").unwrap_or(trimmed);
+    u32::from_str_radix(trimmed, 16).with_context(|| format!("invalid camouflage flags: {input}"))
+}
+
+fn camouflage_driver(
+    h: &HANDLE,
+    base: &str,
+    full: Option<&str>,
+    driver: Option<&str>,
+    flags: &str,
+) -> anyhow::Result<()> {
+    if base.is_empty() || base.len() >= CAMOUFLAGE_BASE_NAME_MAX {
+        bail!("base name length must be 1..{CAMOUFLAGE_BASE_NAME_MAX}");
+    }
+    if let Some(full) = full {
+        if full.is_empty() || full.len() >= CAMOUFLAGE_FULL_PATH_MAX {
+            bail!("full path length must be 1..{CAMOUFLAGE_FULL_PATH_MAX}");
+        }
+    }
+    if let Some(driver) = driver {
+        if driver.is_empty() || driver.len() >= CAMOUFLAGE_DRIVER_NAME_MAX {
+            bail!("driver name length must be 1..{CAMOUFLAGE_DRIVER_NAME_MAX}");
+        }
+    }
+
+    let flags = parse_camouflage_flags(flags)?;
+
+    let mut request = CamouflageRequest {
+        flags,
+        ..CamouflageRequest::default()
+    };
+    request.base_name[..base.len()].copy_from_slice(base.as_bytes());
+    if let Some(full) = full {
+        request.full_path[..full.len()].copy_from_slice(full.as_bytes());
+    }
+    if let Some(driver) = driver {
+        request.driver_name[..driver.len()].copy_from_slice(driver.as_bytes());
+    }
+
+    let mut response = CamouflageResponse::default();
+    let mut returned = 0u32;
+    unsafe {
+        DeviceIoControl(
+            *h,
+            IOCTL_CAMOUFLAGE,
+            Some(std::ptr::from_ref(&request).cast::<c_void>()),
+            size_of::<CamouflageRequest>() as u32,
+            Some(std::ptr::from_mut(&mut response).cast::<c_void>()),
+            size_of::<CamouflageResponse>() as u32,
+            Some(std::ptr::from_mut(&mut returned)),
+            None,
+        )?;
+    }
+    if returned as usize != size_of::<CamouflageResponse>() {
+        bail!("IOCTL_CAMOUFLAGE returned {returned} bytes");
+    }
+    if response.success == 0 {
+        bail!(
+            "camouflage failed (module may be hidden already — run before `hide`, \
+             or ensure DriverSection is present)"
+        );
+    }
+
+    println!("camouflage ok (base={base}):");
+    println!("  BaseDllName:      {}", flag(response.base_dll_name));
+    println!("  FullDllName:      {}", flag(response.full_dll_name));
+    println!("  DriverObjectName: {}", flag(response.driver_object_name));
     Ok(())
 }
 

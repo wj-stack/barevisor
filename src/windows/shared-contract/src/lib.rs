@@ -162,6 +162,14 @@ pub const IOCTL_HIDE: u32 = ctl_code(
     FILE_ANY_ACCESS,
 );
 
+/// Post-load driver module name camouflage (`CamouflageRequest`).
+pub const IOCTL_CAMOUFLAGE: u32 = ctl_code(
+    FILE_DEVICE_UNKNOWN,
+    0x917,
+    METHOD_BUFFERED,
+    FILE_ANY_ACCESS,
+);
+
 /// Maximum bytes per read/write IOCTL (must match `hv::hypercall::HV_MEM_IO_MAX_LEN`).
 pub const MEM_IO_MAX_LEN: usize = 4096;
 
@@ -615,6 +623,69 @@ pub struct HideResponse {
     pub _padding: [u8; 3],
     /// Number of 4 KB pages hidden via EPT.
     pub ept_pages_hidden: u32,
+}
+
+/// Maximum fake [`CamouflageRequest::base_name`] length (UTF-8 bytes, NUL excluded).
+pub const CAMOUFLAGE_BASE_NAME_MAX: usize = 64;
+
+/// Maximum fake [`CamouflageRequest::full_path`] length (UTF-8 bytes, NUL excluded).
+pub const CAMOUFLAGE_FULL_PATH_MAX: usize = 260;
+
+/// Maximum fake [`CamouflageRequest::driver_name`] length (UTF-8 bytes, NUL excluded).
+pub const CAMOUFLAGE_DRIVER_NAME_MAX: usize = 64;
+
+/// Patch `_LDR_DATA_TABLE_ENTRY.BaseDllName`.
+pub const CAMOUFLAGE_FLAG_BASE_DLL_NAME: u32 = 1 << 0;
+/// Patch `_LDR_DATA_TABLE_ENTRY.FullDllName`.
+pub const CAMOUFLAGE_FLAG_FULL_DLL_NAME: u32 = 1 << 1;
+/// Patch `DRIVER_OBJECT.DriverName` (object-manager visible name string).
+pub const CAMOUFLAGE_FLAG_DRIVER_OBJECT_NAME: u32 = 1 << 2;
+/// Default camouflage stages (`base` + `full` + `driver_object`).
+pub const CAMOUFLAGE_FLAG_ALL: u32 = CAMOUFLAGE_FLAG_BASE_DLL_NAME
+    | CAMOUFLAGE_FLAG_FULL_DLL_NAME
+    | CAMOUFLAGE_FLAG_DRIVER_OBJECT_NAME;
+
+/// Input for [`IOCTL_CAMOUFLAGE`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CamouflageRequest {
+    /// Fake module basename (e.g. `360AntiHacker64.sys`).
+    pub base_name: [u8; CAMOUFLAGE_BASE_NAME_MAX],
+    /// Fake full image path. When empty, the driver derives
+    /// `\SystemRoot\System32\drivers\{base_name}`.
+    pub full_path: [u8; CAMOUFLAGE_FULL_PATH_MAX],
+    /// Fake driver object name without `\Driver\` prefix. When empty, derived from `base_name`
+    /// by stripping a trailing `.sys`.
+    pub driver_name: [u8; CAMOUFLAGE_DRIVER_NAME_MAX],
+    /// Bitmask of [`CAMOUFLAGE_FLAG_*`] values.
+    pub flags: u32,
+}
+
+impl Default for CamouflageRequest {
+    fn default() -> Self {
+        Self {
+            base_name: [0; CAMOUFLAGE_BASE_NAME_MAX],
+            full_path: [0; CAMOUFLAGE_FULL_PATH_MAX],
+            driver_name: [0; CAMOUFLAGE_DRIVER_NAME_MAX],
+            flags: CAMOUFLAGE_FLAG_ALL,
+        }
+    }
+}
+
+/// Output for [`IOCTL_CAMOUFLAGE`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CamouflageResponse {
+    /// `1` when at least one requested stage succeeded.
+    pub success: u8,
+    /// `BaseDllName` patched.
+    pub base_dll_name: u8,
+    /// `FullDllName` patched.
+    pub full_dll_name: u8,
+    /// `DriverName` patched.
+    pub driver_object_name: u8,
+    /// Reserved; must be zero.
+    pub _padding: [u8; 4],
 }
 
 /// Input for [`IOCTL_READ_GVA`].

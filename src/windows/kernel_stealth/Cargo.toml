@@ -1,6 +1,6 @@
 [package]
 name = "kernel_stealth"
-description = "Windows kernel driver stealth helpers (module unlink, registry cleanup)"
+description = "Windows kernel driver stealth helpers (module unlink/rename, registry cleanup)"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

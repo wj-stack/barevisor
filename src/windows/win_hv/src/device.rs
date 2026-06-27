@@ -3,11 +3,12 @@
 use core::mem::size_of;
 
 use shared_contract::{
-    ClearTraceRequest, ClearTraceResponse, EptHook2Request, EptHook2Response, EptUnhookRequest,
-    GetCr3ByPidRequest, GetCr3ByPidResponse, GetSsdtFunctionRequest, GetSsdtFunctionResponse,
-    GetSsdtResponse, HideRequest, HideResponse, IOCTL_CLEAR_TRACE, IOCTL_EPT_HOOK2, IOCTL_EPT_UNHOOK,
-    IOCTL_GET_CR3_BY_PID, IOCTL_GET_SSDT, IOCTL_GET_SSDT_FUNCTION, IOCTL_HIDE, IOCTL_PING,
-    IOCTL_QUERY_TRACE, IOCTL_READ_GVA, IOCTL_READ_MEMORY, IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY,
+    CamouflageRequest, CamouflageResponse, ClearTraceRequest, ClearTraceResponse, EptHook2Request,
+    EptHook2Response, EptUnhookRequest, GetCr3ByPidRequest, GetCr3ByPidResponse,
+    GetSsdtFunctionRequest, GetSsdtFunctionResponse, GetSsdtResponse, HideRequest, HideResponse,
+    IOCTL_CAMOUFLAGE, IOCTL_CLEAR_TRACE, IOCTL_EPT_HOOK2, IOCTL_EPT_UNHOOK, IOCTL_GET_CR3_BY_PID,
+    IOCTL_GET_SSDT, IOCTL_GET_SSDT_FUNCTION, IOCTL_HIDE, IOCTL_PING, IOCTL_QUERY_TRACE,
+    IOCTL_READ_GVA, IOCTL_READ_MEMORY, IOCTL_TRANSLATE_GVA, IOCTL_WRITE_MEMORY,
     IOCTL_WRITE_PHYSICAL, MEM_IO_MAX_LEN, MemIoRequest, PhysMemIoRequest, PING_RESPONSE_U32,
     QueryTraceRequest, QueryTraceResponse, ReadGvaRequest, TranslateGvaRequest,
     TranslateGvaResponse, TRANSLATE_FAIL_CR3, TRANSLATE_METHOD_CR3_SWITCH,
@@ -122,6 +123,7 @@ unsafe extern "C" fn dispatch_device_control(
             handle_ioctl_query_trace(irp, input_len, output_len, system_buffer)
         }
         IOCTL_HIDE => handle_ioctl_hide(irp, input_len, output_len, system_buffer),
+        IOCTL_CAMOUFLAGE => handle_ioctl_camouflage(irp, input_len, output_len, system_buffer),
         _ => {
             eprintln!("IOCTL unknown: {ioctl_code:#x}");
             unsafe { complete_request(irp, STATUS_INVALID_DEVICE_REQUEST, 0) }
@@ -778,6 +780,38 @@ fn handle_ioctl_hide(
     }
     crate::eprintln!("IOCTL_HIDE: dispatch ok");
     unsafe { complete_request(irp, STATUS_SUCCESS, size_of::<HideResponse>()) }
+}
+
+fn handle_ioctl_camouflage(
+    irp: *mut IRP,
+    input_len: usize,
+    output_len: usize,
+    system_buffer: *mut u8,
+) -> NTSTATUS {
+    if input_len < size_of::<CamouflageRequest>() {
+        return unsafe { complete_request(irp, STATUS_INVALID_PARAMETER, 0) };
+    }
+    if output_len < size_of::<CamouflageResponse>() {
+        return unsafe { complete_request(irp, STATUS_BUFFER_TOO_SMALL, 0) };
+    }
+    if system_buffer.is_null() {
+        return unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, 0) };
+    }
+
+    let request = unsafe { system_buffer.cast::<CamouflageRequest>().read_unaligned() };
+    crate::eprintln!("IOCTL_CAMOUFLAGE: dispatch begin");
+    let response = crate::stealth::apply_camouflage(&request);
+    unsafe {
+        system_buffer
+            .cast::<CamouflageResponse>()
+            .write_unaligned(response);
+    }
+    if response.success == 0 {
+        crate::eprintln!("IOCTL_CAMOUFLAGE: failed no stage succeeded");
+        return unsafe { complete_request(irp, STATUS_UNSUCCESSFUL, size_of::<CamouflageResponse>()) };
+    }
+    crate::eprintln!("IOCTL_CAMOUFLAGE: dispatch ok");
+    unsafe { complete_request(irp, STATUS_SUCCESS, size_of::<CamouflageResponse>()) }
 }
 
 fn handle_ioctl_ept_unhook(
